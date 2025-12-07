@@ -1,0 +1,64 @@
+menu "MicroLink Configuration"
+
+    config MICROLINK_ENABLED
+        bool "Enable MicroLink Tailscale VPN"
+        default y
+        help
+            Enable MicroLink, a Tailscale-compatible VPN client for ESP32.
+
+    config MICROLINK_MAX_PEERS
+        int "Maximum number of peers"
+        default 16
+        range 1 64
+        help
+            Maximum number of Tailscale peers to track. Each peer uses ~200 bytes.
+
+    config MICROLINK_MAX_ENDPOINTS
+        int "Maximum endpoints per peer"
+        default 8
+        range 2 16
+        help
+            Maximum number of network endpoints per peer.
+
+    config MICROLINK_ENABLE_DERP
+        bool "Enable DERP relay support"
+        default y
+        help
+            Enable DERP (Designated Encrypted Relay for Packets) for NAT traversal.
+            Recommended for reliable connectivity behind NAT.
+
+    config MICROLINK_ENABLE_DISCO
+        bool "Enable DISCO path discovery"
+        default y
+        help
+            Enable DISCO protocol for path optimization and direct P2P connections.
+
+    config MICROLINK_ENABLE_STUN
+        bool "Enable STUN NAT discovery"
+        default y
+        help
+            Enable STUN client for discovering public IP and port mapping.
+
+    config MICROLINK_HEARTBEAT_INTERVAL_MS
+        int "Heartbeat interval (ms)"
+        default 25000
+        range 10000 60000
+        help
+            Interval between coordination server heartbeats.
+            Tailscale requires heartbeats every 25-30 seconds to maintain "online" status.
+
+    config MICROLINK_DERP_REGION
+        int "Default DERP region ID"
+        default 9
+        range 1 99
+        help
+            Default DERP region to use. Common regions:
+            1=NYC, 2=SF, 9=Dallas, 10=Seattle, 11=Singapore, 14=Sydney
+
+    config MICROLINK_DEBUG_LOGGING
+        bool "Enable debug logging"
+        default n
+        help
+            Enable verbose debug logging for troubleshooting.
+
+endmenu
