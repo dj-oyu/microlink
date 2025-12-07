@@ -36,7 +36,7 @@ MicroLink is a complete, production-ready implementation of the Tailscale protoc
 
 Tested hardware:
 - ESP32-S3 with 8MB PSRAM (recommended)
-- Waveshare ESP32-S3 Touch LCD 1.28
+- Waveshare ESP32-S3-Touch-AMOLED-2.06
 - Seeed Studio XIAO ESP32S3 Sense
 
 ## Quick Start
