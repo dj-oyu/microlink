@@ -70,6 +70,19 @@ menu "MicroLink Configuration"
             - You want deterministic DERP selection
             - Your tailnet uses default Tailscale DERP configuration
 
+    config MICROLINK_COORD_BUFFER_SIZE_KB
+        int "Coordination buffer size (KB)"
+        default 64
+        range 16 128
+        help
+            Size of the buffer used for MapResponse parsing (in KB).
+
+            For ESP32-S3 with PSRAM: Use 64KB (default) for best performance.
+            For ESP32 without PSRAM: Use 24KB or 32KB to fit in limited SRAM.
+
+            Smaller buffers may cause issues with very large tailnets (many peers).
+            16KB is the minimum for basic operation.
+
     config MICROLINK_DEBUG_LOGGING
         bool "Enable debug logging"
         default n

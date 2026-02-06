@@ -32,12 +32,43 @@ MicroLink is a complete, production-ready implementation of the Tailscale protoc
 
 ## Hardware Requirements
 
-**PSRAM is strongly recommended.** MicroLink uses ~64KB buffers for Tailscale MapResponse parsing. Without PSRAM, you may experience memory issues.
+### Recommended: ESP32-S3 with PSRAM
+
+For production deployments, **ESP32-S3 with PSRAM is recommended**. The 8MB external PSRAM provides ample headroom for MicroLink's buffers plus your application logic.
 
 Tested hardware:
 - ESP32-S3 with 8MB PSRAM (recommended)
 - Waveshare ESP32-S3-Touch-AMOLED-2.06
 - Seeed Studio XIAO ESP32S3 Sense
+
+### Supported: Standard ESP32 (No PSRAM)
+
+MicroLink also runs on standard ESP32 boards without PSRAM, with reduced buffer sizes. This is suitable for simple IoT applications where memory headroom is less critical.
+
+Tested hardware:
+- HiLetgo ESP-32S
+- ESP32-WROOM-32D
+- ESP32-DevKitC
+
+**Memory profile on ESP32 (no PSRAM):**
+
+| Stage | Free Heap | Notes |
+|-------|-----------|-------|
+| Boot | ~267KB | Total available SRAM |
+| After WiFi | ~225KB | WiFi stack overhead |
+| After MicroLink | ~193KB | Core initialization |
+| Running (connected) | ~140KB | DERP + coordination active |
+| **Minimum observed** | **~9KB** | Low-water mark during operation |
+
+To use MicroLink on ESP32 without PSRAM, configure reduced buffer sizes:
+
+```ini
+# sdkconfig.defaults for ESP32 without PSRAM
+CONFIG_MICROLINK_COORD_BUFFER_SIZE_KB=24
+CONFIG_MICROLINK_MAX_PEERS=8
+```
+
+See `examples/ping_pong_esp32/` for a complete working example.
 
 ## Quick Start
 
@@ -220,10 +251,11 @@ uint32_t microlink_get_peer_latency(const microlink_t *ml, uint32_t peer_vpn_ip)
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `MICROLINK_MAX_PEERS` | `16` | Maximum peers to track (reduce to 8 for non-PSRAM) |
+| `MICROLINK_COORD_BUFFER_SIZE_KB` | `64` | Coordination buffer size (use 24 for non-PSRAM) |
 | `MICROLINK_DERP_REGION` | `9` (Dallas) | Default DERP region ID |
 | `MICROLINK_DERP_DYNAMIC_DISCOVERY` | `n` | Enable dynamic DERP region discovery |
 | `MICROLINK_HEARTBEAT_INTERVAL_MS` | `25000` | Heartbeat interval |
-| `MICROLINK_MAX_PEERS` | `16` | Maximum peers to track |
 
 ### DERP Server Configuration
 
@@ -254,19 +286,47 @@ This solves issues where users have custom derpMap configurations that null out 
 
 ## Memory Usage
 
+### ESP32-S3 with PSRAM (Recommended)
+
 | Component | SRAM | PSRAM |
 |-----------|------|-------|
 | Core | ~50KB | - |
 | Per Peer | ~200B | - |
-| Buffers | ~24KB | Optional |
-| **Total** | ~100KB | 24KB |
+| Coord Buffer | - | 64KB |
+| **Total** | ~50KB | 64KB |
+
+Leaves ~400KB+ SRAM free for your application.
+
+### ESP32 without PSRAM
+
+| Component | SRAM |
+|-----------|------|
+| WiFi Stack | ~42KB |
+| MicroLink Core | ~50KB |
+| Coord Buffer | 24KB |
+| DERP/TLS | ~20KB |
+| Per Peer (×8) | ~1.6KB |
+| **Total** | ~138KB |
+
+Leaves ~9-15KB headroom. Suitable for:
+- Simple sensor reporting (temperature, humidity, GPIO states)
+- Remote relay/switch control
+- Status monitoring and heartbeats
+- Small data payloads (<1KB per message)
+
+**Not recommended for:**
+- Display drivers (require significant RAM)
+- Audio/video processing
+- Large data buffers or file transfers
+- Running alongside other memory-heavy components
 
 ## Examples
 
 See the `examples/` directory:
 
 - `basic_connect/` - Minimal connection example
-- `ping_pong/` - Respond to `tailscale ping` with latency monitoring
+- `ping_pong/` - Respond to `tailscale ping` with latency monitoring (ESP32-S3)
+- `ping_pong_esp32/` - Memory-optimized version for ESP32 without PSRAM
 - `sensor_node/` - Practical IoT example: send sensor data over VPN
 
 ## Testing

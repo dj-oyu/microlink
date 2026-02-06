@@ -25,8 +25,13 @@ extern "C" {
 #define MICROLINK_COORDINATION_CORE  1    // Core 1: High-priority coordination polling
 #define MICROLINK_MAIN_CORE          0    // Core 0: DERP, DISCO, state machine
 
-// PSRAM buffer sizes (uses external 8MB PSRAM, not precious 512KB SRAM)
-#define MICROLINK_COORD_BUFFER_SIZE  (64 * 1024)  // 64KB for large MapResponses
+// Coordination buffer size (configurable via menuconfig)
+// Default 64KB for PSRAM devices, use 24-32KB for ESP32 without PSRAM
+#ifdef CONFIG_MICROLINK_COORD_BUFFER_SIZE_KB
+#define MICROLINK_COORD_BUFFER_SIZE  (CONFIG_MICROLINK_COORD_BUFFER_SIZE_KB * 1024)
+#else
+#define MICROLINK_COORD_BUFFER_SIZE  (64 * 1024)  // Default 64KB for large MapResponses
+#endif
 #define MICROLINK_COORD_TASK_STACK   (8 * 1024)   // 8KB stack for coordination task
 #define MICROLINK_COORD_TASK_PRIORITY (configMAX_PRIORITIES - 1)  // Highest priority
 
