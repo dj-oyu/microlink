@@ -48,9 +48,22 @@ extern "C" {
 #define NOISE_NONCE_SIZE 12
 #define NOISE_MAC_SIZE 16
 
+// DERP region limits
+#define MICROLINK_MAX_DERP_REGIONS 32  // Max DERP regions to track from DERPMap (Tailscale has ~25 regions)
+
 /* ============================================================================
  * Internal Structures
  * ========================================================================== */
+
+/**
+ * @brief DERP region info (parsed from MapResponse DERPMap)
+ */
+typedef struct {
+    uint16_t region_id;                 ///< Region ID (e.g., 1=NYC, 9=Dallas)
+    char hostname[64];                  ///< DERP server hostname (e.g., "derp1.tailscale.com")
+    uint16_t port;                      ///< Port (usually 443)
+    bool available;                     ///< True if this region is available in tailnet config
+} microlink_derp_region_t;
 
 /**
  * @brief Network packet buffer
@@ -124,6 +137,15 @@ typedef struct {
     bool connected;
     uint32_t our_derp_id;               ///< Our DERP client ID
     uint64_t last_keepalive_ms;
+
+    // Dynamic DERP region discovery (optional feature - parsed from MapResponse DERPMap)
+    // When enabled, MicroLink will use the DERP regions advertised by Tailscale instead of hardcoded values.
+    // This is useful when the tailnet has custom derpMap configurations that disable certain regions.
+    // Default: disabled (uses MICROLINK_DERP_SERVER/MICROLINK_DERP_REGION from Kconfig)
+    microlink_derp_region_t regions[MICROLINK_MAX_DERP_REGIONS];
+    uint8_t region_count;               ///< Number of discovered DERP regions (0 = use hardcoded)
+    uint8_t current_region_idx;         ///< Index of currently connected region
+    bool dynamic_discovery_enabled;     ///< True to use DERPMap from server, false for hardcoded
 } microlink_derp_t;
 
 /**

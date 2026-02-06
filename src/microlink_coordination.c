@@ -2978,6 +2978,84 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
         }
     }
 
+    // ========================================================================
+    // Parse DERPMap for dynamic DERP region discovery (optional feature)
+    // ========================================================================
+    // When MICROLINK_DERP_DYNAMIC_DISCOVERY is enabled, parse available DERP
+    // regions from the MapResponse. This handles cases where the tailnet has
+    // custom derpMap configurations that disable certain regions.
+    //
+    // DERPMap structure (simplified):
+    // {
+    //   "Regions": {
+    //     "1": { "RegionID": 1, "RegionCode": "nyc", "Nodes": [{"HostName": "derp1.tailscale.com", ...}] },
+    //     "9": { "RegionID": 9, "RegionCode": "dfw", "Nodes": [{"HostName": "derp9d.tailscale.com", ...}] }
+    //   }
+    // }
+    // Regions set to null in derpMap are omitted from this response.
+#ifdef CONFIG_MICROLINK_DERP_DYNAMIC_DISCOVERY
+    if (ml->derp.dynamic_discovery_enabled) {
+        cJSON *derp_map = cJSON_GetObjectItem(root, "DERPMap");
+        if (derp_map) {
+            cJSON *regions = cJSON_GetObjectItem(derp_map, "Regions");
+            if (regions && cJSON_IsObject(regions)) {
+                ml->derp.region_count = 0;
+
+                cJSON *region = NULL;
+                cJSON_ArrayForEach(region, regions) {
+                    if (ml->derp.region_count >= MICROLINK_MAX_DERP_REGIONS) {
+                        ESP_LOGW(TAG, "DERPMap: Max regions (%d) reached, ignoring rest",
+                                 MICROLINK_MAX_DERP_REGIONS);
+                        break;
+                    }
+
+                    if (!cJSON_IsObject(region)) continue;
+
+                    cJSON *region_id = cJSON_GetObjectItem(region, "RegionID");
+                    cJSON *nodes = cJSON_GetObjectItem(region, "Nodes");
+
+                    if (!region_id || !cJSON_IsNumber(region_id)) continue;
+                    if (!nodes || !cJSON_IsArray(nodes) || cJSON_GetArraySize(nodes) == 0) continue;
+
+                    // Get first node's hostname
+                    cJSON *first_node = cJSON_GetArrayItem(nodes, 0);
+                    if (!first_node) continue;
+
+                    cJSON *hostname = cJSON_GetObjectItem(first_node, "HostName");
+                    if (!hostname || !cJSON_IsString(hostname)) continue;
+
+                    // Store this region
+                    microlink_derp_region_t *r = &ml->derp.regions[ml->derp.region_count];
+                    r->region_id = (uint16_t)region_id->valueint;
+                    strncpy(r->hostname, hostname->valuestring, sizeof(r->hostname) - 1);
+                    r->hostname[sizeof(r->hostname) - 1] = '\0';
+                    r->port = 443;  // Default DERP port
+                    r->available = true;
+
+                    // Check for custom port in DERPPort field
+                    cJSON *derp_port = cJSON_GetObjectItem(first_node, "DERPPort");
+                    if (derp_port && cJSON_IsNumber(derp_port) && derp_port->valueint > 0) {
+                        r->port = (uint16_t)derp_port->valueint;
+                    }
+
+                    ESP_LOGI(TAG, "DERPMap: Region %d -> %s:%d",
+                             r->region_id, r->hostname, r->port);
+                    ml->derp.region_count++;
+                }
+
+                if (ml->derp.region_count > 0) {
+                    ESP_LOGI(TAG, "DERPMap: Discovered %d available DERP regions",
+                             ml->derp.region_count);
+                } else {
+                    ESP_LOGW(TAG, "DERPMap: No valid regions found, falling back to hardcoded");
+                }
+            }
+        } else {
+            ESP_LOGD(TAG, "DERPMap: Not present in MapResponse (using hardcoded DERP)");
+        }
+    }
+#endif  // CONFIG_MICROLINK_DERP_DYNAMIC_DISCOVERY
+
     // Extract peers from MapResponse
     // Tailscale uses different field names depending on the response type:
     // - "Peers": Full peer list (initial response with Stream=false)

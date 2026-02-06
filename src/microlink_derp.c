@@ -508,6 +508,16 @@ esp_err_t microlink_derp_init(microlink_t *ml) {
     memset(&ml->derp, 0, sizeof(microlink_derp_t));
     ml->derp.sockfd = -1;
 
+    // Initialize dynamic DERP discovery based on Kconfig
+#ifdef CONFIG_MICROLINK_DERP_DYNAMIC_DISCOVERY
+    ml->derp.dynamic_discovery_enabled = true;
+    ESP_LOGI(TAG, "DERP dynamic discovery: ENABLED (will use DERPMap from server)");
+#else
+    ml->derp.dynamic_discovery_enabled = false;
+    ESP_LOGI(TAG, "DERP dynamic discovery: DISABLED (using hardcoded: %s)",
+             MICROLINK_DERP_SERVER);
+#endif
+
     // Initialize mbedTLS RNG (once)
     if (!derp_rng_initialized) {
         mbedtls_entropy_init(&derp_entropy);
@@ -556,9 +566,109 @@ esp_err_t microlink_derp_deinit(microlink_t *ml) {
 
 static esp_err_t derp_connect_once(microlink_t *ml);
 
+/* Current DERP port (may be overridden by dynamic discovery) */
+static uint16_t current_derp_port = MICROLINK_DERP_PORT;
+
 esp_err_t microlink_derp_connect(microlink_t *ml) {
-    // Try primary server first, then fallback
+    // ========================================================================
+    // DERP Server Selection Strategy:
+    // 1. If dynamic discovery is enabled AND regions were discovered from DERPMap,
+    //    use the discovered regions in order.
+    // 2. Otherwise, use the hardcoded MICROLINK_DERP_SERVER and fallback.
+    //
+    // This allows users to:
+    // - Use hardcoded servers for self-hosted DERP or deterministic selection
+    // - Use dynamic discovery when tailnet has custom derpMap configurations
+    // ========================================================================
+
+#ifdef CONFIG_MICROLINK_DERP_DYNAMIC_DISCOVERY
+    // Dynamic discovery mode: use regions from DERPMap if available
+    if (ml->derp.dynamic_discovery_enabled && ml->derp.region_count > 0) {
+        ESP_LOGI(TAG, "DERP: Using dynamic discovery (%d regions available)",
+                 ml->derp.region_count);
+
+        // First, try to find and connect to the preferred region (from Kconfig)
+        int preferred_region_id = MICROLINK_DERP_REGION;
+        int preferred_idx = -1;
+        for (int i = 0; i < ml->derp.region_count; i++) {
+            if (ml->derp.regions[i].region_id == preferred_region_id) {
+                preferred_idx = i;
+                break;
+            }
+        }
+
+        if (preferred_idx >= 0) {
+            ESP_LOGI(TAG, "DERP: Found preferred region %d in discovered list", preferred_region_id);
+        } else {
+            ESP_LOGW(TAG, "DERP: Preferred region %d not in discovered list, will try others", preferred_region_id);
+        }
+
+        // Build connection order: preferred first, then others
+        int connection_order[MICROLINK_MAX_DERP_REGIONS];
+        int order_count = 0;
+
+        // Add preferred region first if found
+        if (preferred_idx >= 0) {
+            connection_order[order_count++] = preferred_idx;
+        }
+
+        // Add remaining regions
+        for (int i = 0; i < ml->derp.region_count; i++) {
+            if (i != preferred_idx) {
+                connection_order[order_count++] = i;
+            }
+        }
+
+        for (int order_idx = 0; order_idx < order_count; order_idx++) {
+            int region_idx = connection_order[order_idx];
+            microlink_derp_region_t *region = &ml->derp.regions[region_idx];
+            current_derp_server = region->hostname;
+            current_derp_port = region->port;
+
+            // Retry each region up to 2 times
+            for (int attempt = 1; attempt <= 2; attempt++) {
+                ESP_LOGI(TAG, "DERP connect: region=%d server=%s:%d attempt=%d",
+                         region->region_id, current_derp_server, current_derp_port, attempt);
+
+                esp_err_t err = derp_connect_once(ml);
+                if (err == ESP_OK) {
+                    ml->derp.current_region_idx = region_idx;
+                    ESP_LOGI(TAG, "DERP: Connected to region %d (%s)",
+                             region->region_id, current_derp_server);
+                    return ESP_OK;
+                }
+
+                // Cleanup for retry
+                mbedtls_ssl_close_notify(&ml->derp.ssl);
+                mbedtls_ssl_free(&ml->derp.ssl);
+                mbedtls_ssl_config_free(&ml->derp.ssl_conf);
+                mbedtls_net_free(&derp_server_fd);
+                ml->derp.sockfd = -1;
+
+                mbedtls_net_init(&derp_server_fd);
+                mbedtls_ssl_init(&ml->derp.ssl);
+                mbedtls_ssl_config_init(&ml->derp.ssl_conf);
+
+                if (attempt < 2) {
+                    ESP_LOGW(TAG, "DERP attempt %d to region %d failed, retrying...",
+                             attempt, region->region_id);
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                }
+            }
+
+            ESP_LOGW(TAG, "DERP: Region %d (%s) failed, trying next region",
+                     region->region_id, current_derp_server);
+        }
+
+        ESP_LOGE(TAG, "DERP: All %d discovered regions failed", ml->derp.region_count);
+        return ESP_FAIL;
+    }
+#endif  // CONFIG_MICROLINK_DERP_DYNAMIC_DISCOVERY
+
+    // Hardcoded mode (default): use configured servers
+    ESP_LOGI(TAG, "DERP: Using hardcoded servers");
     const char *servers[] = {MICROLINK_DERP_SERVER, MICROLINK_DERP_SERVER_FALLBACK};
+    current_derp_port = MICROLINK_DERP_PORT;
 
     for (int server_idx = 0; server_idx < 2; server_idx++) {
         current_derp_server = servers[server_idx];
@@ -607,9 +717,9 @@ static esp_err_t derp_connect_once(microlink_t *ml) {
     char port_str[8];
 
     ESP_LOGI(TAG, "Connecting to DERP relay: %s:%d",
-             current_derp_server, MICROLINK_DERP_PORT);
+             current_derp_server, current_derp_port);
 
-    snprintf(port_str, sizeof(port_str), "%d", MICROLINK_DERP_PORT);
+    snprintf(port_str, sizeof(port_str), "%d", current_derp_port);
 
     // Step 1: TCP connection
     ESP_LOGI(TAG, "Establishing TCP connection...");

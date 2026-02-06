@@ -31,7 +31,7 @@ static const char *TAG = "ping_pong";
 
 #define WIFI_SSID          "YOUR_WIFI_SSID"
 #define WIFI_PASSWORD      "YOUR_WIFI_PASSWORD"
-#define TAILSCALE_AUTH_KEY "tskey-auth-XXXXXXXX"
+#define TAILSCALE_AUTH_KEY "tskey-auth-xxxxx"
 #define DEVICE_NAME        "esp32-ping-pong"
 
 /* ============================================================================

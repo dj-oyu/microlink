@@ -55,6 +55,21 @@ menu "MicroLink Configuration"
             Default DERP region to use. Common regions:
             1=NYC, 2=SF, 9=Dallas, 10=Seattle, 11=Singapore, 14=Sydney
 
+    config MICROLINK_DERP_DYNAMIC_DISCOVERY
+        bool "Enable dynamic DERP region discovery"
+        default n
+        help
+            When enabled, MicroLink will parse the DERPMap from the Tailscale
+            MapResponse and use available regions dynamically. This is useful
+            if your tailnet has a custom derpMap configuration that disables
+            certain regions.
+
+            When disabled (default), MicroLink uses the hardcoded DERP server
+            configured by MICROLINK_DERP_REGION. This is preferred when:
+            - Using your own self-hosted DERP server
+            - You want deterministic DERP selection
+            - Your tailnet uses default Tailscale DERP configuration
+
     config MICROLINK_DEBUG_LOGGING
         bool "Enable debug logging"
         default n

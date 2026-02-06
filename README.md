@@ -82,7 +82,23 @@ CONFIG_LWIP_IP4_REASSEMBLY=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 ```
 
-Then run `idf.py menuconfig` to customize MicroLink options if needed.
+Then run `idf.py menuconfig` to customize MicroLink options:
+
+```
+Component config → MicroLink Configuration
+├── Enable MicroLink Tailscale VPN     [*]
+├── Maximum number of peers            (16)
+├── Maximum endpoints per peer         (8)
+├── Enable DERP relay support          [*]
+├── Enable DISCO path discovery        [*]
+├── Enable STUN NAT discovery          [*]
+├── Heartbeat interval (ms)            (25000)
+├── Default DERP region ID             (9)      ← Change this for different regions
+├── Enable dynamic DERP region discovery [ ]    ← Enable for custom derpMap setups
+└── Enable debug logging               [ ]
+```
+
+**Important:** If your tailnet uses a custom `derpMap` configuration, see [DERP Server Configuration](#derp-server-configuration) below.
 
 ### 3. Use in your code
 
@@ -189,6 +205,8 @@ uint32_t microlink_get_peer_latency(const microlink_t *ml, uint32_t peer_vpn_ip)
 
 ## Configuration Options
 
+### Runtime Configuration
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `auth_key` | Required | Tailscale auth key |
@@ -197,6 +215,42 @@ uint32_t microlink_get_peer_latency(const microlink_t *ml, uint32_t peer_vpn_ip)
 | `enable_disco` | `true` | Enable path discovery |
 | `enable_stun` | `true` | Enable STUN NAT discovery |
 | `max_peers` | `16` | Maximum peer count |
+
+### Kconfig Options (idf.py menuconfig)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `MICROLINK_DERP_REGION` | `9` (Dallas) | Default DERP region ID |
+| `MICROLINK_DERP_DYNAMIC_DISCOVERY` | `n` | Enable dynamic DERP region discovery |
+| `MICROLINK_HEARTBEAT_INTERVAL_MS` | `25000` | Heartbeat interval |
+| `MICROLINK_MAX_PEERS` | `16` | Maximum peers to track |
+
+### DERP Server Configuration
+
+By default, MicroLink uses hardcoded DERP servers (Dallas primary, NYC fallback). This is ideal for:
+- **Self-hosted DERP**: Point to your own DERP server
+- **Deterministic selection**: Always use a specific region
+- **Standard Tailscale setups**: Works out of the box
+
+#### Dynamic DERP Discovery (Optional)
+
+If your tailnet has a custom `derpMap` configuration that disables certain regions, enable dynamic discovery:
+
+```bash
+idf.py menuconfig
+# Navigate to: Component config → MicroLink Configuration
+# Enable: "Enable dynamic DERP region discovery"
+```
+
+When enabled, MicroLink will:
+1. Parse the `DERPMap` from the Tailscale MapResponse (supports up to 32 regions)
+2. Prioritize connecting to the preferred region configured in Kconfig (`MICROLINK_DERP_REGION`)
+3. Automatically fall back to other discovered regions if the preferred region is unavailable
+4. Ensure the ESP32 connects to the same DERP region it advertises as `PreferredDERP`
+
+This solves issues where users have custom derpMap configurations that null out certain region IDs.
+
+**Important:** The ESP32 must connect to the same DERP region it advertises. Tailscale's DERP mesh does support cross-region routing, but peers send packets to whichever DERP region you advertise as your `PreferredDERP`. If there's a mismatch, DISCO PING/PONG packets won't reach your device.
 
 ## Memory Usage
 
@@ -238,8 +292,9 @@ pong from esp32-device (100.x.x.x) via DERP(dfw) in 150ms
 
 ### `tailscale ping` times out
 - Verify DISCO is enabled
-- Check DERP connection
+- Check DERP connection in logs
 - Look for "PONG sent" in logs
+- **If using custom derpMap:** Run `tailscale netcheck --verbose` to verify the configured DERP region is available. Change `MICROLINK_DERP_REGION` in menuconfig or enable dynamic discovery.
 
 ### High latency
 - This is normal for DERP relay (100-300ms)
@@ -250,9 +305,20 @@ pong from esp32-device (100.x.x.x) via DERP(dfw) in 150ms
 - Check that `CONFIG_SPIRAM=y` is set
 - Verify your board has PSRAM (most ESP32-S3 dev boards do)
 
+### `tailscale ping` works but shows "via DERP" with different region than expected
+- This can happen when dynamic discovery is enabled but the ESP32 connects to a different region than it advertises
+- Check logs for "DERP: Connecting to region X" and ensure it matches your configured `MICROLINK_DERP_REGION`
+- The ESP32 must physically connect to the DERP region it advertises as `PreferredDERP`, otherwise peers will send packets to the wrong relay
+
 ### App partition too small
 - Add `CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y` to sdkconfig.defaults
 - Clean build: `rm -rf build sdkconfig && idf.py build`
+
+### Device online but can't reach peers (custom derpMap)
+If your tailnet has a custom `derpMap` configuration that disables certain DERP regions:
+1. Run `tailscale netcheck --verbose` to see available regions
+2. Either change `MICROLINK_DERP_REGION` in menuconfig to an available region, OR
+3. Enable `MICROLINK_DERP_DYNAMIC_DISCOVERY` in menuconfig to auto-detect available regions
 
 ## License
 
