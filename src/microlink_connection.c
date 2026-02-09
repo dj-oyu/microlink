@@ -90,18 +90,30 @@ void microlink_state_machine(microlink_t *ml) {
         case MICROLINK_STATE_FETCHING_PEERS: {
             // Run STUN FIRST so MapRequest includes our public endpoint
             // This is CRITICAL - without endpoints, peers can't reach us directly
-            // Use time_in_state to ensure STUN runs on first entry (time_in_state ~0)
-            // and wait 500ms for STUN to complete before sending MapRequest
-            if (ml->config.enable_stun && time_in_state < 100) {
+            // Use static flag to ensure STUN runs exactly once per state entry
+            static bool stun_attempted = false;
+            static uint64_t stun_start_time = 0;
+
+            if (ml->config.enable_stun && !stun_attempted) {
+                stun_attempted = true;
+                stun_start_time = now_ms;
                 ESP_LOGI(TAG, "Running STUN probe BEFORE MapRequest to discover endpoint...");
-                microlink_stun_probe(ml);
+                esp_err_t stun_ret = microlink_stun_probe(ml);
+                if (stun_ret == ESP_OK) {
+                    ESP_LOGI(TAG, "STUN probe initiated, waiting for response...");
+                } else {
+                    ESP_LOGW(TAG, "STUN probe failed: %d (continuing without STUN endpoint)", stun_ret);
+                }
                 break;  // Return and wait for STUN to complete
             }
 
-            // Wait a bit for STUN response before sending MapRequest
-            if (ml->config.enable_stun && time_in_state < 500) {
+            // Wait up to 500ms for STUN response before sending MapRequest
+            if (ml->config.enable_stun && stun_attempted && (now_ms - stun_start_time) < 500) {
                 break;  // Give STUN time to complete
             }
+
+            // Reset flag for next time we enter this state
+            stun_attempted = false;
 
             // Fetch peer list from coordination server
             // STUN should be done now so Endpoints are included in MapRequest
@@ -275,11 +287,13 @@ void microlink_state_machine(microlink_t *ml) {
             // Run DISCO probes if enabled
             // NOTE: Core 1 handles coordination, so DISCO can run freely on Core 0
             if (ml->config.enable_disco) {
+                // Always check for incoming DISCO packets (PONGs) - this must be frequent!
+                microlink_disco_update_paths(ml);
+
+                // Send probes less frequently (every 30 seconds)
                 uint64_t since_disco = now_ms - ml->disco.last_global_disco_ms;
                 if (since_disco >= MICROLINK_DISCO_INTERVAL_MS) {
                     microlink_disco_probe_peers(ml);
-                    // No longer need to poll coordination here - Core 1 handles it!
-                    microlink_disco_update_paths(ml);
                     ml->disco.last_global_disco_ms = now_ms;
                 }
             }

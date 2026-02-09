@@ -204,19 +204,21 @@ static int disco_build_pong(microlink_t *ml, const microlink_peer_t *peer,
  */
 static esp_err_t disco_send_udp(uint32_t ip, uint16_t port, const uint8_t *data, size_t len) {
     if (disco_socket < 0) {
+        ESP_LOGE(TAG, "disco_send_udp: socket not initialized!");
         return ESP_ERR_INVALID_STATE;
     }
 
+    // IP is already in network byte order (from htonl when parsed), don't convert again
     struct sockaddr_in dest_addr = {
         .sin_family = AF_INET,
         .sin_port = htons(port),
-        .sin_addr.s_addr = htonl(ip)
+        .sin_addr.s_addr = ip  // Already network byte order
     };
 
     int sent = sendto(disco_socket, data, len, 0,
                       (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     if (sent < 0) {
-        ESP_LOGD(TAG, "sendto failed: errno=%d", errno);
+        ESP_LOGE(TAG, "sendto failed: errno=%d", errno);
         return ESP_FAIL;
     }
 
@@ -244,9 +246,18 @@ static esp_err_t disco_probe_endpoint(microlink_t *ml, uint8_t peer_idx, uint8_t
         return ESP_FAIL;
     }
 
-    // Send UDP packet
+    // Send UDP packet (ep->ip is in network byte order, convert to host for logging)
+    uint32_t ip_host = ntohl(ep->ip);
+    ESP_LOGI(TAG, "Sending DISCO PING to %lu.%lu.%lu.%lu:%d",
+             (unsigned long)((ip_host >> 24) & 0xFF),
+             (unsigned long)((ip_host >> 16) & 0xFF),
+             (unsigned long)((ip_host >> 8) & 0xFF),
+             (unsigned long)(ip_host & 0xFF),
+             ep->port);
+
     esp_err_t err = disco_send_udp(ep->ip, ep->port, packet, pkt_len);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "  DISCO PING send FAILED: %d", err);
         return err;
     }
 
@@ -255,7 +266,7 @@ static esp_err_t disco_probe_endpoint(microlink_t *ml, uint8_t peer_idx, uint8_t
     probe->send_time_ms = microlink_get_time_ms();
     probe->pending = true;
 
-    ESP_LOGD(TAG, "Sent DISCO ping to %08lx:%d", (unsigned long)ep->ip, ep->port);
+    ESP_LOGI(TAG, "  DISCO PING sent OK, awaiting PONG...");
     return ESP_OK;
 }
 
@@ -267,7 +278,7 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
     // Minimum packet size: magic + key + nonce + encrypted(type + txid) + mac
     size_t min_len = DISCO_MAGIC_LEN + DISCO_KEY_LEN + DISCO_NONCE_LEN + DISCO_MAC_LEN + 1 + DISCO_TXID_LEN;
     if (len < min_len) {
-        ESP_LOGD(TAG, "DISCO packet too short: %zu", len);
+        ESP_LOGD(TAG, "DISCO packet too short: %u", (unsigned int)len);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -304,7 +315,7 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
     size_t plaintext_len = ciphertext_len - DISCO_MAC_LEN;
 
     if (plaintext_len > sizeof(plaintext)) {
-        ESP_LOGW(TAG, "DISCO payload too large: %zu", plaintext_len);
+        ESP_LOGW(TAG, "DISCO payload too large: %u", (unsigned int)plaintext_len);
         return ESP_ERR_NO_MEM;
     }
 
@@ -318,7 +329,7 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
 
     // Validate decrypted payload: [type (1)][version (1)][txid (12)][...]
     if (plaintext_len < 1 + 1 + DISCO_TXID_LEN) {
-        ESP_LOGD(TAG, "DISCO payload too short after decrypt: %zu", plaintext_len);
+        ESP_LOGD(TAG, "DISCO payload too short after decrypt: %u", (unsigned int)plaintext_len);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -404,23 +415,29 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
                         }
                     }
 
-                    // Initiate WireGuard handshake via DERP if path is via DERP
+                    // Initiate WireGuard handshake via DERP ONLY if peer has no direct path.
+                    // IMPORTANT: Don't call wireguardif_connect_derp if we have a direct path,
+                    // because it clears the endpoint IP and forces DERP relay!
                     if ((is_derp_slot || via_derp) && ml->wireguard.netif) {
-                        extern err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *current_ip, u16_t *current_port);
-                        extern err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index);
+                        // Only use DERP handshake if peer is currently using DERP (no direct path)
+                        if (peer->using_derp) {
+                            extern err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *current_ip, u16_t *current_port);
+                            extern err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index);
 
-                        ip_addr_t dummy_ip;
-                        u16_t dummy_port;
-                        err_t up_err = wireguardif_peer_is_up((struct netif *)ml->wireguard.netif, peer_idx, &dummy_ip, &dummy_port);
+                            ip_addr_t dummy_ip;
+                            u16_t dummy_port;
+                            err_t up_err = wireguardif_peer_is_up((struct netif *)ml->wireguard.netif, peer_idx, &dummy_ip, &dummy_port);
 
-                        if (up_err != ERR_OK) {
-                            peer->using_derp = true;
-                            err_t wg_err = wireguardif_connect_derp((struct netif *)ml->wireguard.netif, peer_idx);
-                            if (wg_err == ERR_OK) {
-                                ESP_LOGD(TAG, "WG handshake initiated for peer %d", peer_idx);
-                            } else {
-                                ESP_LOGW(TAG, "WG handshake failed: %d", wg_err);
+                            if (up_err != ERR_OK) {
+                                err_t wg_err = wireguardif_connect_derp((struct netif *)ml->wireguard.netif, peer_idx);
+                                if (wg_err == ERR_OK) {
+                                    ESP_LOGD(TAG, "WG DERP handshake initiated for peer %d", peer_idx);
+                                } else {
+                                    ESP_LOGW(TAG, "WG DERP handshake failed: %d", wg_err);
+                                }
                             }
+                        } else {
+                            ESP_LOGI(TAG, "Skipping DERP handshake for peer %d - direct path established", peer_idx);
                         }
                     }
 
@@ -473,9 +490,84 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
 
         case DISCO_MSG_CALL_ME_MAYBE: {
             // Peer is asking us to try connecting to their endpoints
-            ESP_LOGI(TAG, "CallMeMaybe from peer %d", peer_idx);
-            // Trigger probing of this peer
+            // CallMeMaybe format: [type(1)][version(1)][endpoints: N * 18 bytes]
+            // Each endpoint is: [10 bytes zeros][2 bytes 0xff][4 bytes IPv4][2 bytes port BE]
+            ESP_LOGI(TAG, "CallMeMaybe from peer %d, payload_len=%u", peer_idx, (unsigned int)plaintext_len);
+
+            // Parse endpoints from CallMeMaybe (skip type and version bytes)
+            size_t endpoint_data_start = 2;  // After type + version
+            size_t endpoint_size = 18;       // IPv6-mapped-IPv4 (16) + port (2)
+            int parsed_endpoints = 0;
+
+            // Clear existing endpoints before adding new ones from CallMeMaybe
+            peer->endpoint_count = 0;
+
+            for (size_t offset = endpoint_data_start;
+                 offset + endpoint_size <= plaintext_len && parsed_endpoints < MICROLINK_MAX_ENDPOINTS;
+                 offset += endpoint_size) {
+
+                const uint8_t *ep_data = plaintext + offset;
+
+                // Check for IPv6-mapped-IPv4 format: first 10 bytes = 0, then 2 bytes = 0xff
+                bool is_ipv4_mapped = true;
+                for (int i = 0; i < 10; i++) {
+                    if (ep_data[i] != 0) {
+                        is_ipv4_mapped = false;
+                        break;
+                    }
+                }
+                if (ep_data[10] != 0xff || ep_data[11] != 0xff) {
+                    is_ipv4_mapped = false;
+                }
+
+                if (is_ipv4_mapped) {
+                    // Extract IPv4 (bytes 12-15) - packet is in network byte order (big-endian)
+                    // Build host-order value, then convert to network order for storage
+                    // (consistent with how microlink_coordination.c stores endpoints)
+                    uint32_t ipv4_host = ((uint32_t)ep_data[12] << 24) |
+                                         ((uint32_t)ep_data[13] << 16) |
+                                         ((uint32_t)ep_data[14] << 8) |
+                                         (uint32_t)ep_data[15];
+                    uint32_t ipv4 = htonl(ipv4_host);  // Convert to network byte order
+
+                    // Extract port (bytes 16-17) - big endian
+                    uint16_t port = ((uint16_t)ep_data[16] << 8) | ep_data[17];
+
+                    // Skip invalid endpoints (0.0.0.0 or port 0)
+                    if (ipv4 != 0 && port != 0) {
+                        peer->endpoints[parsed_endpoints].ip = ipv4;
+                        peer->endpoints[parsed_endpoints].port = port;
+                        peer->endpoints[parsed_endpoints].is_derp = false;
+                        parsed_endpoints++;
+
+                        // Log using host order for readability
+                        ESP_LOGI(TAG, "  CallMeMaybe endpoint[%d]: %lu.%lu.%lu.%lu:%u",
+                                 parsed_endpoints - 1,
+                                 (unsigned long)((ipv4_host >> 24) & 0xFF),
+                                 (unsigned long)((ipv4_host >> 16) & 0xFF),
+                                 (unsigned long)((ipv4_host >> 8) & 0xFF),
+                                 (unsigned long)(ipv4_host & 0xFF),
+                                 port);
+                    }
+                } else {
+                    ESP_LOGD(TAG, "  Skipping non-IPv4-mapped endpoint at offset %u", (unsigned int)offset);
+                }
+            }
+
+            peer->endpoint_count = parsed_endpoints;
+            ESP_LOGI(TAG, "CallMeMaybe: parsed %d endpoints from peer %d (%s)",
+                     parsed_endpoints, peer_idx, peer->hostname);
+
+            // Trigger probing of this peer's new endpoints
             ml->disco.peer_disco[peer_idx].active = true;
+
+            // If we got endpoints, immediately try to probe them
+            if (parsed_endpoints > 0) {
+                ESP_LOGI(TAG, "Initiating direct probes to peer %d endpoints...", peer_idx);
+                for (int ep = 0; ep < parsed_endpoints && ep < MICROLINK_MAX_ENDPOINTS; ep++) {
+                    disco_probe_endpoint(ml, peer_idx, ep);
+                }
+            }
             break;
         }
 
@@ -609,6 +701,14 @@ esp_err_t microlink_disco_update_paths(microlink_t *ml) {
         uint32_t src_ip = ntohl(src_addr.sin_addr.s_addr);
         uint16_t src_port = ntohs(src_addr.sin_port);
 
+        ESP_LOGI(TAG, "DISCO UDP received: %d bytes from %lu.%lu.%lu.%lu:%u",
+                 len,
+                 (unsigned long)((src_ip >> 24) & 0xFF),
+                 (unsigned long)((src_ip >> 16) & 0xFF),
+                 (unsigned long)((src_ip >> 8) & 0xFF),
+                 (unsigned long)(src_ip & 0xFF),
+                 src_port);
+
         disco_process_packet(ml, rx_buf, len, src_ip, src_port);
     }
 
@@ -714,4 +814,114 @@ esp_err_t microlink_disco_handle_derp_packet(microlink_t *ml, const uint8_t *src
 
 bool microlink_disco_is_disco_packet(const uint8_t *data, size_t len) {
     return (len >= DISCO_MAGIC_LEN && memcmp(data, DISCO_MAGIC, DISCO_MAGIC_LEN) == 0);
+}
+
+/**
+ * @brief Send DISCO CallMeMaybe to a specific peer
+ *
+ * CallMeMaybe tells the peer "please try to connect to me" and includes
+ * our endpoints. This is used to trigger peer-initiated WireGuard handshakes
+ * when ESP32-initiated handshakes don't complete due to NAT/firewall asymmetry.
+ *
+ * CallMeMaybe format (encrypted payload):
+ * - 1 byte: message type (0x03)
+ * - 1 byte: version (0x00)
+ * - N * 18 bytes: endpoint list (IPv6-mapped-IPv4 + port)
+ *
+ * The peer will receive this and attempt to connect to each endpoint listed.
+ */
+esp_err_t microlink_disco_send_call_me_maybe(microlink_t *ml, uint32_t peer_vpn_ip) {
+    if (!ml || !ml->derp.connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Find peer by VPN IP
+    int peer_idx = -1;
+    for (int i = 0; i < ml->peer_count; i++) {
+        if (ml->peers[i].vpn_ip == peer_vpn_ip) {
+            peer_idx = i;
+            break;
+        }
+    }
+
+    if (peer_idx < 0) {
+        ESP_LOGW(TAG, "CallMeMaybe: peer not found for VPN IP");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    microlink_peer_t *peer = &ml->peers[peer_idx];
+
+    // Generate random nonce
+    uint8_t nonce[DISCO_NONCE_LEN];
+    disco_random_bytes(nonce, DISCO_NONCE_LEN);
+
+    // Build plaintext: [type (1)][version (1)][endpoints (N * 18)]
+    // Each endpoint is: IPv6-mapped-IPv4 (16 bytes) + port (2 bytes big-endian)
+    // We'll include our STUN-discovered endpoint if available, plus local endpoint
+    uint8_t plaintext[2 + 2 * 18];  // type + version + up to 2 endpoints
+    int pt_offset = 0;
+
+    plaintext[pt_offset++] = DISCO_MSG_CALL_ME_MAYBE;  // type
+    plaintext[pt_offset++] = 0;                         // version = 0
+
+    // Add STUN endpoint if we have one
+    if (ml->stun.public_ip != 0) {
+        // IPv6-mapped-IPv4: 10 bytes zeros, 2 bytes 0xff, 4 bytes IPv4
+        memset(plaintext + pt_offset, 0, 10);
+        pt_offset += 10;
+        plaintext[pt_offset++] = 0xff;
+        plaintext[pt_offset++] = 0xff;
+        // IPv4 in network byte order
+        plaintext[pt_offset++] = (ml->stun.public_ip >> 24) & 0xFF;
+        plaintext[pt_offset++] = (ml->stun.public_ip >> 16) & 0xFF;
+        plaintext[pt_offset++] = (ml->stun.public_ip >> 8) & 0xFF;
+        plaintext[pt_offset++] = ml->stun.public_ip & 0xFF;
+        // Port - use STUN-discovered port if available (NAT assigns external port)
+        uint16_t my_port = (ml->stun.public_port != 0) ? ml->stun.public_port : ml->wireguard.listen_port;
+        plaintext[pt_offset++] = (my_port >> 8) & 0xFF;
+        plaintext[pt_offset++] = my_port & 0xFF;
+
+        char ip_buf[16];
+        ESP_LOGI(TAG, "CallMeMaybe includes STUN endpoint: %s:%u",
+                 microlink_vpn_ip_to_str(ml->stun.public_ip, ip_buf), my_port);
+    } else {
+        ESP_LOGW(TAG, "CallMeMaybe: no STUN endpoint available (run STUN probe first)");
+    }
+
+    // Encrypt using peer's DISCO key
+    uint8_t ciphertext[sizeof(plaintext) + DISCO_MAC_LEN];
+    if (nacl_box(ciphertext, plaintext, pt_offset, nonce,
+                 peer->disco_key, ml->wireguard.disco_private_key) != 0) {
+        ESP_LOGE(TAG, "CallMeMaybe encryption failed");
+        return ESP_FAIL;
+    }
+
+    // Build full packet: [magic][our_disco_pubkey][nonce][ciphertext]
+    uint8_t packet[DISCO_MAX_PACKET_SIZE];
+    int pkt_offset = 0;
+
+    memcpy(packet + pkt_offset, DISCO_MAGIC, DISCO_MAGIC_LEN);
+    pkt_offset += DISCO_MAGIC_LEN;
+
+    memcpy(packet + pkt_offset, ml->wireguard.disco_public_key, DISCO_KEY_LEN);
+    pkt_offset += DISCO_KEY_LEN;
+
+    memcpy(packet + pkt_offset, nonce, DISCO_NONCE_LEN);
+    pkt_offset += DISCO_NONCE_LEN;
+
+    size_t ciphertext_len = pt_offset + DISCO_MAC_LEN;
+    memcpy(packet + pkt_offset, ciphertext, ciphertext_len);
+    pkt_offset += ciphertext_len;
+
+    // Send via DERP relay
+    esp_err_t err = microlink_derp_send(ml, peer_vpn_ip, packet, pkt_offset);
+    if (err == ESP_OK) {
+        char ip_buf[16];
+        ESP_LOGI(TAG, "CallMeMaybe sent to peer %d (%s) via DERP",
+                 peer_idx, microlink_vpn_ip_to_str(peer_vpn_ip, ip_buf));
+    } else {
+        ESP_LOGE(TAG, "Failed to send CallMeMaybe via DERP: %d", err);
+    }
+
+    return err;
 }

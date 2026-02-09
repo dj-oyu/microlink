@@ -45,7 +45,7 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
  * We queue these packets and send them from the main MicroLink task.
  * ========================================================================== */
 
-#define DERP_QUEUE_SIZE 4
+#define DERP_QUEUE_SIZE 8
 #define DERP_PACKET_MAX_SIZE 256
 
 typedef struct {
@@ -554,7 +554,7 @@ esp_err_t microlink_wireguard_send(microlink_t *ml, uint32_t dest_vpn_ip,
     // For now, wireguard-lwip handles this at the lwIP layer automatically
     // We would need to create IP packets and pass them to the netif
 
-    ESP_LOGD(TAG, "WireGuard send: %zu bytes to peer %d", len, peer_index);
+    ESP_LOGD(TAG, "WireGuard send: %u bytes to peer %d", (unsigned int)len, peer_index);
     ml->stats.direct_packets_sent++;
 
     // Return success - actual sending happens via lwIP routing
@@ -629,7 +629,7 @@ esp_err_t microlink_wireguard_inject_derp_packet(microlink_t *ml, uint32_t src_v
 
     // Note: wireguardif_network_rx frees the pbuf
 
-    ESP_LOGD(TAG, "Injected %zu byte DERP packet for WireGuard processing", len);
+    ESP_LOGD(TAG, "Injected %u byte DERP packet for WireGuard processing", (unsigned int)len);
     return ESP_OK;
 }
 
@@ -659,7 +659,7 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
     if (stack_remaining < 4096) {
         // Queue the packet for later sending from main task
         if (len > DERP_PACKET_MAX_SIZE) {
-            ESP_LOGW(TAG, "DERP packet too large to queue: %zu", len);
+            ESP_LOGW(TAG, "DERP packet too large to queue: %u", (unsigned int)len);
             return ERR_MEM;
         }
 
@@ -671,8 +671,8 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
                 derp_packet_queue[i].len = len;
                 derp_packet_queue[i].pending = true;
                 queued_ml_ctx = ml;
-                ESP_LOGI(TAG, "DERP output queued (slot %d): %zu bytes, stack=%lu",
-                         i, len, (unsigned long)stack_remaining);
+                ESP_LOGI(TAG, "DERP output queued (slot %d): %u bytes, stack=%lu",
+                         i, (unsigned int)len, (unsigned long)stack_remaining);
                 return ERR_OK;
             }
         }
@@ -682,8 +682,8 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
         return ERR_OK;  // Don't return error, WireGuard will retry
     }
 
-    ESP_LOGI(TAG, "DERP output callback: sending %zu byte WG packet to peer %02x%02x%02x%02x... (stack=%lu)",
-             len, peer_public_key[0], peer_public_key[1], peer_public_key[2], peer_public_key[3],
+    ESP_LOGI(TAG, "DERP output callback: sending %u byte WG packet to peer %02x%02x%02x%02x... (stack=%lu)",
+             (unsigned int)len, peer_public_key[0], peer_public_key[1], peer_public_key[2], peer_public_key[3],
              (unsigned long)stack_remaining);
 
     // Send via DERP using the peer's public key
@@ -706,10 +706,19 @@ void microlink_wireguard_process_derp_queue(void) {
         return;
     }
 
+    // Check if any packets pending
+    int pending_count = 0;
+    for (int i = 0; i < DERP_QUEUE_SIZE; i++) {
+        if (derp_packet_queue[i].pending) pending_count++;
+    }
+    if (pending_count > 0) {
+        ESP_LOGI(TAG, "Processing DERP queue: %d packets pending", pending_count);
+    }
+
     for (int i = 0; i < DERP_QUEUE_SIZE; i++) {
         if (derp_packet_queue[i].pending) {
-            ESP_LOGI(TAG, "Processing queued DERP packet (slot %d): %zu bytes",
-                     i, derp_packet_queue[i].len);
+            ESP_LOGI(TAG, "Sending queued DERP packet (slot %d): %u bytes",
+                     i, (unsigned int)derp_packet_queue[i].len);
 
             esp_err_t err = microlink_derp_send_raw(
                 queued_ml_ctx,
