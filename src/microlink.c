@@ -10,6 +10,9 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "lwip/netif.h"
+#include "lwip/ip_addr.h"
+#include "lwip/err.h"
 
 static const char *TAG = "microlink";
 
@@ -380,6 +383,25 @@ bool microlink_is_connected(const microlink_t *ml) {
 
 uint32_t microlink_get_vpn_ip(const microlink_t *ml) {
     return ml ? ml->vpn_ip : 0;
+}
+
+bool microlink_any_peer_up(const microlink_t *ml) {
+    if (!ml || !ml->wireguard.initialized || !ml->wireguard.netif) {
+        return false;
+    }
+    extern err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index,
+                                         ip_addr_t *current_ip, u16_t *current_port);
+    ip_addr_t dummy_ip;
+    u16_t dummy_port;
+    for (int i = 0; i < MICROLINK_PEER_MAP_SIZE; i++) {
+        if (ml->peer_map[i] != 0xFF) {
+            if (wireguardif_peer_is_up((struct netif *)ml->wireguard.netif,
+                                        ml->peer_map[i], &dummy_ip, &dummy_port) == ERR_OK) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 esp_err_t microlink_get_peers(const microlink_t *ml,

@@ -1,0 +1,9 @@
+{
+  "name": "wireguard_lwip",
+  "version": "1.0.0",
+  "description": "WireGuard protocol implementation for lwIP",
+  "build": {
+    "srcDir": "src",
+    "srcFilter": ["+<*.c>", "+<crypto/refc/*.c>", "-<crypto/cortex/>"]
+  }
+}

@@ -54,9 +54,9 @@ extern "C" {
 // Tailscale DERP regions: 1=NYC, 2=SF, 9=DFW(Dallas), 10=SEA(Seattle), etc.
 // Use derp9d.tailscale.com for Dallas region (region ID 9)
 // IMPORTANT: DERP hostname number != region ID (derp10 is Seattle/region 10, derp9d is Dallas/region 9)
-#define MICROLINK_DERP_SERVER "derp9d.tailscale.com"  // Dallas (dfw) - Region ID 9
-#define MICROLINK_DERP_REGION 9  // Must match the server! Region 9 = Dallas
-#define MICROLINK_DERP_SERVER_FALLBACK "derp1.tailscale.com"  // NYC fallback (region 1)
+#define MICROLINK_DERP_SERVER "derp7.tailscale.com"   // Tokyo (nrt) - Region ID 7
+#define MICROLINK_DERP_REGION 7  // Must match the server! Region 7 = Tokyo
+#define MICROLINK_DERP_SERVER_FALLBACK "derp11.tailscale.com"  // Singapore fallback (region 11)
 #define MICROLINK_DERP_PORT 443
 
 // STUN servers (fallback list)
@@ -257,6 +257,18 @@ bool microlink_is_connected(const microlink_t *ml);
  * @return VPN IP (100.x.x.x) in host byte order, 0 if not connected
  */
 uint32_t microlink_get_vpn_ip(const microlink_t *ml);
+
+/**
+ * @brief Check if any WireGuard peer has an active tunnel
+ *
+ * Returns true when at least one peer's WireGuard handshake has completed
+ * and a valid keypair exists. Use this to verify data can actually flow
+ * through the VPN before attempting connections.
+ *
+ * @param ml MicroLink handle
+ * @return true if at least one peer tunnel is active
+ */
+bool microlink_any_peer_up(const microlink_t *ml);
 
 /**
  * @brief Get peer list

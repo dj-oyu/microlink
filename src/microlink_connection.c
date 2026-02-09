@@ -119,18 +119,19 @@ void microlink_state_machine(microlink_t *ml) {
         }
 
         case MICROLINK_STATE_CONFIGURING_WG: {
-            // Add peers to WireGuard
+            // Connect to DERP BEFORE adding peers so handshake initiation
+            // can be relayed immediately (VPN IP available from MapRequest)
+            if (ml->config.enable_derp && !ml->derp.connected) {
+                ESP_LOGI(TAG, "Connecting to DERP relay...");
+                microlink_derp_connect(ml);
+            }
+
+            // Add peers to WireGuard (handshake via DERP if no direct endpoint)
             for (uint8_t i = 0; i < ml->peer_count; i++) {
                 esp_err_t ret = microlink_wireguard_add_peer(ml, &ml->peers[i]);
                 if (ret != ESP_OK) {
                     ESP_LOGW(TAG, "Failed to add peer %d", i);
                 }
-            }
-
-            // Connect to DERP AFTER we have VPN IP from MapRequest
-            if (ml->config.enable_derp && !ml->derp.connected) {
-                ESP_LOGI(TAG, "Connecting to DERP relay...");
-                microlink_derp_connect(ml);
             }
 
             // STUN already done in FETCHING_PEERS state

@@ -1,0 +1,12 @@
+{
+  "name": "microlink",
+  "version": "1.0.0",
+  "description": "MicroLink - Tailscale-compatible VPN client for ESP32",
+  "dependencies": {
+    "wireguard_lwip": "*"
+  },
+  "build": {
+    "srcDir": "src",
+    "srcFilter": ["+<*.c>", "-<x25519.c>"]
+  }
+}

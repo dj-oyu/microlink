@@ -33,7 +33,7 @@ extern "C" {
 #define MICROLINK_COORD_BUFFER_SIZE  (64 * 1024)  // Default 64KB for large MapResponses
 #endif
 #define MICROLINK_COORD_TASK_STACK   (8 * 1024)   // 8KB stack for coordination task
-#define MICROLINK_COORD_TASK_PRIORITY (configMAX_PRIORITIES - 1)  // Highest priority
+#define MICROLINK_COORD_TASK_PRIORITY 2  // Below pipeline tasks to avoid display stutter
 
 // Polling intervals for coordination task
 #define MICROLINK_COORD_POLL_INTERVAL_MS  10   // 10ms = 100Hz polling (fast enough to keep up with server)
