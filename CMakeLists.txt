@@ -9,6 +9,7 @@ idf_component_register(
         "src/microlink_derp.c"
         "src/microlink_disco.c"
         "src/microlink_stun.c"
+        "src/microlink_udp.c"
         "src/microlink_wireguard.c"
         "src/nacl_box.c"
         "src/x25519.c"

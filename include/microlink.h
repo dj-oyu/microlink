@@ -314,6 +314,131 @@ const char *microlink_state_to_str(microlink_state_t state);
  */
 void microlink_get_default_config(microlink_config_t *config);
 
+/**
+ * @brief Get auto-generated device name from MAC address
+ *
+ * Returns a unique device name in format "esp32-XXYYZZ" where XXYYZZ
+ * is the last 3 bytes of the WiFi MAC address in hex.
+ *
+ * @return Device name string (static buffer, do not free)
+ */
+const char *microlink_get_device_name(void);
+
+/* ============================================================================
+ * UDP Socket API (Task 1.3 - PSTOP Transport Layer)
+ *
+ * These functions provide simple UDP send/receive over the Tailscale VPN,
+ * equivalent to: echo "data" | nc -u <tailscale_ip> <port>
+ *
+ * Use these for application-level protocols (like PSTOP heartbeat) that
+ * need to communicate with specific IP:port combinations.
+ * ========================================================================== */
+
+/**
+ * @brief UDP socket handle (opaque)
+ */
+typedef struct microlink_udp_socket microlink_udp_socket_t;
+
+/**
+ * @brief Create a UDP socket bound to the VPN interface
+ *
+ * Creates a UDP socket that can send/receive data over the Tailscale VPN.
+ * The socket is automatically bound to the WireGuard interface.
+ *
+ * @param ml MicroLink handle (must be connected)
+ * @param local_port Local port to bind (0 for auto-assign)
+ * @return UDP socket handle on success, NULL on failure
+ */
+microlink_udp_socket_t *microlink_udp_create(microlink_t *ml, uint16_t local_port);
+
+/**
+ * @brief Close and free a UDP socket
+ *
+ * @param sock UDP socket handle
+ */
+void microlink_udp_close(microlink_udp_socket_t *sock);
+
+/**
+ * @brief Send UDP data to a specific IP:port
+ *
+ * Equivalent to: echo "data" | nc -u <dest_ip> <dest_port>
+ *
+ * @param sock UDP socket handle
+ * @param dest_ip Destination IP (Tailscale VPN IP, host byte order)
+ * @param dest_port Destination port
+ * @param data Data to send
+ * @param len Data length
+ * @return ESP_OK on success, error code on failure
+ */
+esp_err_t microlink_udp_send(microlink_udp_socket_t *sock, uint32_t dest_ip,
+                              uint16_t dest_port, const void *data, size_t len);
+
+/**
+ * @brief Send UDP data (convenience function without socket)
+ *
+ * Creates a temporary socket, sends the data, and closes it.
+ * Less efficient for repeated sends - use microlink_udp_create() for that.
+ *
+ * @param ml MicroLink handle (must be connected)
+ * @param dest_ip Destination IP (Tailscale VPN IP, host byte order)
+ * @param dest_port Destination port
+ * @param data Data to send
+ * @param len Data length
+ * @return ESP_OK on success, error code on failure
+ */
+esp_err_t microlink_udp_sendto(microlink_t *ml, uint32_t dest_ip,
+                                uint16_t dest_port, const void *data, size_t len);
+
+/**
+ * @brief Receive UDP data (non-blocking)
+ *
+ * @param sock UDP socket handle
+ * @param[out] src_ip Source IP (filled on success)
+ * @param[out] src_port Source port (filled on success)
+ * @param[out] buffer Buffer to receive data
+ * @param[in,out] len Buffer size on input, received length on output
+ * @param timeout_ms Timeout in milliseconds (0 for non-blocking)
+ * @return ESP_OK on success, ESP_ERR_TIMEOUT if no data, error code on failure
+ */
+esp_err_t microlink_udp_recv(microlink_udp_socket_t *sock, uint32_t *src_ip,
+                              uint16_t *src_port, void *buffer, size_t *len,
+                              uint32_t timeout_ms);
+
+/**
+ * @brief Get the local port of a UDP socket
+ *
+ * @param sock UDP socket handle
+ * @return Local port number, 0 on error
+ */
+uint16_t microlink_udp_get_local_port(const microlink_udp_socket_t *sock);
+
+/**
+ * @brief Parse IP string to host byte order uint32
+ *
+ * Parses "100.64.0.10" to 0x6440000A (host byte order)
+ *
+ * @param ip_str IP address string (e.g., "100.64.0.10")
+ * @return IP in host byte order, 0 on parse error
+ */
+uint32_t microlink_parse_ip(const char *ip_str);
+
+/* ============================================================================
+ * DISCO Functions (for advanced use)
+ * ========================================================================== */
+
+/**
+ * @brief Send DISCO CallMeMaybe to request peer initiate handshake
+ *
+ * CallMeMaybe tells the peer "please try to connect to me" and includes
+ * our endpoints. This is used to trigger peer-initiated WireGuard handshakes
+ * when ESP32-initiated handshakes don't complete due to NAT/firewall asymmetry.
+ *
+ * @param ml MicroLink handle
+ * @param peer_vpn_ip Peer VPN IP (host byte order)
+ * @return ESP_OK on success, error code on failure
+ */
+esp_err_t microlink_disco_send_call_me_maybe(microlink_t *ml, uint32_t peer_vpn_ip);
+
 #ifdef __cplusplus
 }
 #endif
