@@ -140,4 +140,13 @@ void wireguardif_set_derp_output(struct netif *netif, wireguard_derp_output_fn f
 // The handshake will be routed through the DERP callback if set
 err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index);
 
+// Register a callback for forwarding non-WG packets (e.g., DISCO) received on the WG UDP port.
+// This enables single-port demuxing: DISCO and WG share the same port for NAT traversal.
+void wireguardif_set_disco_forward(struct netif *netif, wireguard_disco_fwd_fn fn, void *ctx);
+
+// Register a callback for sending WG packets through an external socket (DISCO socket).
+// When set, direct WG output uses this callback instead of udp_sendto, ensuring WG traffic
+// comes from the DISCO port for consistent NAT traversal.
+void wireguardif_set_direct_output(struct netif *netif, wireguard_direct_output_fn fn, void *ctx);
+
 #endif /* _WIREGUARDIF_H_ */

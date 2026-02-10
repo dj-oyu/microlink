@@ -52,6 +52,12 @@
 
 
 static void update_peer_addr(struct wireguard_peer *peer, const ip_addr_t *addr, u16_t port) {
+	// Skip update for DERP-relayed packets (injected with addr=0.0.0.0, port=0).
+	// Without this guard, every DERP data packet would reset peer->ip/port to 0,
+	// reverting any direct endpoint discovered by DISCO hole-punching.
+	if (ip_addr_isany(addr) && port == 0) {
+		return;
+	}
 	peer->ip = *addr;
 	peer->port = port;
 }
@@ -101,6 +107,20 @@ static err_t wireguardif_peer_output(struct netif *netif, struct pbuf *q, struct
 	}
 
 	// Send to last known port, not the connect port
+	// Prefer direct_output_fn (sends through DISCO socket for port consistency)
+	if (device->direct_output_fn) {
+		uint8_t *data = (uint8_t *)mem_malloc(q->tot_len);
+		if (data) {
+			pbuf_copy_partial(q, data, q->tot_len, 0);
+			err_t result = device->direct_output_fn(data, q->tot_len,
+			                                         &peer->ip, peer->port,
+			                                         device->direct_output_ctx);
+			mem_free(data);
+			return result;
+		}
+		return ERR_MEM;
+	}
+
 	//TODO: Support DSCP and ECN - lwip requires this set on PCB globally, not per packet
 	return udp_sendto(device->udp_pcb, q, &peer->ip, peer->port);
 }
@@ -625,7 +645,10 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
 			break;
 
 		default:
-			// Unknown or bad packet header
+			// Not a WG packet — forward to DISCO handler if callback is set
+			if (device->disco_fwd_fn) {
+				device->disco_fwd_fn(data, len, addr, port, device->disco_fwd_ctx);
+			}
 			break;
 	}
 	// Release data!
@@ -1035,4 +1058,20 @@ err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index) {
 		result = ERR_OK;
 	}
 	return result;
+}
+
+void wireguardif_set_disco_forward(struct netif *netif, wireguard_disco_fwd_fn fn, void *ctx) {
+	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+	if (device) {
+		device->disco_fwd_fn = fn;
+		device->disco_fwd_ctx = ctx;
+	}
+}
+
+void wireguardif_set_direct_output(struct netif *netif, wireguard_direct_output_fn fn, void *ctx) {
+	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+	if (device) {
+		device->direct_output_fn = fn;
+		device->direct_output_ctx = ctx;
+	}
 }

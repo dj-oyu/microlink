@@ -78,6 +78,15 @@
 // Returns: ERR_OK on success, error code on failure
 typedef err_t (*wireguard_derp_output_fn)(const uint8_t *peer_public_key, const uint8_t *data, size_t len, void *ctx);
 
+// Callback for forwarding non-WG packets (e.g., DISCO) received on the WG port
+// addr/port are in network/host byte order respectively (same as lwIP conventions)
+typedef void (*wireguard_disco_fwd_fn)(const uint8_t *data, size_t len, const ip_addr_t *addr, u16_t port, void *ctx);
+
+// Callback for sending WG packets through an external socket (e.g., DISCO socket)
+// This ensures WG traffic comes from the same port as DISCO for NAT traversal
+// data: raw WG packet, len: length, dest_ip: lwIP ip_addr_t, dest_port: host byte order
+typedef err_t (*wireguard_direct_output_fn)(const uint8_t *data, size_t len, const ip_addr_t *dest_ip, u16_t dest_port, void *ctx);
+
 struct wireguard_keypair {
 	bool valid;
 	bool initiator; // Did we initiate this session (send the initiation packet rather than sending the response packet)
@@ -195,6 +204,14 @@ struct wireguard_device {
 	// DERP relay output callback for peers without direct endpoints
 	wireguard_derp_output_fn derp_output_fn;
 	void *derp_output_ctx;
+
+	// DISCO forward callback for non-WG packets received on WG port
+	wireguard_disco_fwd_fn disco_fwd_fn;
+	void *disco_fwd_ctx;
+
+	// Direct output callback — sends WG through DISCO socket for port consistency
+	wireguard_direct_output_fn direct_output_fn;
+	void *direct_output_ctx;
 
 	bool valid;
 };
