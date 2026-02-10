@@ -334,6 +334,26 @@ const char *microlink_state_to_str(microlink_state_t state);
  */
 void microlink_get_default_config(microlink_config_t *config);
 
+/**
+ * @brief STUN/NAT discovery info (read-only)
+ */
+typedef struct {
+    uint32_t public_ip;         ///< Discovered public IP (host byte order)
+    uint16_t public_port;       ///< External port from primary STUN
+    uint16_t public_port_alt;   ///< External port from secondary STUN
+    int16_t port_delta;         ///< port_alt - port (0 = Cone, non-zero = Symmetric)
+    uint8_t nat_type;           ///< 0=unknown, 1=none, 2=cone, 3=symmetric
+} microlink_stun_info_t;
+
+/**
+ * @brief Get STUN/NAT discovery results
+ *
+ * @param ml MicroLink handle
+ * @param[out] info STUN info to fill
+ * @return ESP_OK on success
+ */
+esp_err_t microlink_get_stun_info(const microlink_t *ml, microlink_stun_info_t *info);
+
 #ifdef __cplusplus
 }
 #endif

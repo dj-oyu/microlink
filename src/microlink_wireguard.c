@@ -776,7 +776,7 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
         return ERR_OK;  // Don't return error, WireGuard will retry
     }
 
-    ESP_LOGI(TAG, "DERP output callback: sending %zu byte WG packet to peer %02x%02x%02x%02x... (stack=%lu)",
+    ESP_LOGD(TAG, "DERP output callback: sending %zu byte WG packet to peer %02x%02x%02x%02x... (stack=%lu)",
              len, peer_public_key[0], peer_public_key[1], peer_public_key[2], peer_public_key[3],
              (unsigned long)stack_remaining);
 
@@ -802,7 +802,7 @@ void microlink_wireguard_process_derp_queue(void) {
 
     for (int i = 0; i < DERP_QUEUE_SIZE; i++) {
         if (derp_packet_queue[i].pending) {
-            ESP_LOGI(TAG, "Processing queued DERP packet (slot %d): %zu bytes",
+            ESP_LOGD(TAG, "Processing queued DERP packet (slot %d): %zu bytes",
                      i, derp_packet_queue[i].len);
 
             esp_err_t err = microlink_derp_send_raw(

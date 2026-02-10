@@ -99,6 +99,8 @@ void microlink_state_machine(microlink_t *ml) {
             if (ml->config.enable_stun && time_in_state < 100) {
                 ESP_LOGI(TAG, "Running STUN probe BEFORE MapRequest to discover endpoint...");
                 microlink_stun_probe(ml);
+                // Run dual-STUN NAT type detection (reuses DISCO PCB)
+                microlink_stun_detect_nat_type(ml);
                 break;  // Return and wait for STUN to complete
             }
 

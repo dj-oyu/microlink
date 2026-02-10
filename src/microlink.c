@@ -441,6 +441,18 @@ esp_err_t microlink_get_stats(const microlink_t *ml, microlink_stats_t *stats) {
     return ESP_OK;
 }
 
+esp_err_t microlink_get_stun_info(const microlink_t *ml, microlink_stun_info_t *info) {
+    if (!ml || !info) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    info->public_ip = ml->stun.public_ip;
+    info->public_port = ml->stun.public_port;
+    info->public_port_alt = ml->stun.public_port_alt;
+    info->port_delta = ml->stun.port_delta;
+    info->nat_type = (uint8_t)ml->stun.nat_type;
+    return ESP_OK;
+}
+
 uint32_t microlink_get_peer_latency(const microlink_t *ml, uint32_t peer_vpn_ip) {
     if (!ml) return UINT32_MAX;
 

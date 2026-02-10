@@ -156,11 +156,21 @@ typedef struct {
 /**
  * @brief STUN client state
  */
+typedef enum {
+    MICROLINK_NAT_UNKNOWN = 0,
+    MICROLINK_NAT_NONE,             ///< No NAT (public IP)
+    MICROLINK_NAT_CONE,             ///< Cone NAT (EIM: same port for all destinations)
+    MICROLINK_NAT_SYMMETRIC,        ///< Symmetric NAT (EDM: different port per destination)
+} microlink_nat_type_t;
+
 typedef struct {
     uint32_t public_ip;                 ///< Discovered public IP (host byte order)
     uint16_t public_port;               ///< Discovered public port
+    uint16_t public_port_alt;           ///< Port from alternate STUN server (for NAT type detection)
+    int16_t port_delta;                 ///< Port allocation delta (port_alt - port)
     uint64_t last_probe_ms;
     bool nat_detected;
+    microlink_nat_type_t nat_type;
 } microlink_stun_t;
 
 /**
@@ -307,6 +317,7 @@ esp_err_t microlink_derp_receive(microlink_t *ml);
 esp_err_t microlink_stun_init(microlink_t *ml);
 esp_err_t microlink_stun_deinit(microlink_t *ml);
 esp_err_t microlink_stun_probe(microlink_t *ml);
+esp_err_t microlink_stun_detect_nat_type(microlink_t *ml);
 
 // DISCO protocol (microlink_disco.c)
 esp_err_t microlink_disco_init(microlink_t *ml);
