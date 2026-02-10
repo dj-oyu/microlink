@@ -28,7 +28,9 @@
 #include "lwip/udp.h"      // For udp_remove()
 #include "lwip/pbuf.h"     // For pbuf_alloc()
 #include "lwip/timeouts.h" // For sys_untimeout()
-#include "lwip/tcpip.h"    // For LOCK_TCPIP_CORE()
+#include "lwip/tcpip.h"    // For tcpip_try_callback()
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 // External lwIP global
 extern struct netif *netif_list;
@@ -37,6 +39,33 @@ static const char *TAG = "ml_wg";
 
 /* Forward declaration for DERP output callback */
 static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8_t *data, size_t len, void *ctx);
+
+/* ============================================================================
+ * Thread-safe DERP Packet Injection via tcpip_callback
+ *
+ * LOCK_TCPIP_CORE() is a no-op without CONFIG_LWIP_TCPIP_CORE_LOCKING.
+ * Enabling that option causes SDIO contention (tcpip thread blocked on lock).
+ * Instead, we use tcpip_try_callback() to run wireguardif_network_rx()
+ * inside the tcpip thread, which already has exclusive lwIP access.
+ * ========================================================================== */
+
+typedef struct {
+    struct wireguard_device *device;
+    struct udp_pcb *pcb;
+    struct pbuf *p;
+    ip_addr_t addr;
+} wg_inject_ctx_t;
+
+static wg_inject_ctx_t s_inject_ctx;
+static SemaphoreHandle_t s_inject_done = NULL;
+
+static void wg_inject_in_tcpip_thread(void *arg) {
+    wg_inject_ctx_t *ctx = (wg_inject_ctx_t *)arg;
+    extern void wireguardif_network_rx(void *arg, struct udp_pcb *pcb,
+                                        struct pbuf *p, const ip_addr_t *addr, u16_t port);
+    wireguardif_network_rx(ctx->device, ctx->pcb, ctx->p, &ctx->addr, 0);
+    xSemaphoreGive(s_inject_done);
+}
 
 /* ============================================================================
  * Deferred DERP Packet Queue
@@ -569,6 +598,12 @@ esp_err_t microlink_wireguard_receive(microlink_t *ml) {
  *
  * When a WireGuard packet arrives via DERP relay, we need to pass it
  * to the WireGuard stack for decryption and routing.
+ *
+ * Thread safety: wireguardif_network_rx() calls ip_input() which modifies
+ * TCP PCB state. The FetchTask concurrently uses TCP via sockets.
+ * LOCK_TCPIP_CORE() is a no-op without CONFIG_LWIP_TCPIP_CORE_LOCKING,
+ * and enabling that causes SDIO contention. Instead, we use
+ * tcpip_try_callback() to run inside the tcpip thread itself.
  */
 esp_err_t microlink_wireguard_inject_derp_packet(microlink_t *ml, uint32_t src_vpn_ip,
                                                   const uint8_t *data, size_t len) {
@@ -587,6 +622,15 @@ esp_err_t microlink_wireguard_inject_derp_packet(microlink_t *ml, uint32_t src_v
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Lazy-init the semaphore (called from single TailscaleTask, no race)
+    if (!s_inject_done) {
+        s_inject_done = xSemaphoreCreateBinary();
+        if (!s_inject_done) {
+            ESP_LOGE(TAG, "Failed to create inject semaphore");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     // Create a pbuf to hold the packet
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
     if (!p) {
@@ -596,25 +640,29 @@ esp_err_t microlink_wireguard_inject_derp_packet(microlink_t *ml, uint32_t src_v
 
     memcpy(p->payload, data, len);
 
-    // For DERP-relayed packets, we use INADDR_ANY as the source
-    // since the actual peer endpoint is unknown (routed via DERP)
-    ip_addr_t derp_addr;
-    IP_ADDR4(&derp_addr, 0, 0, 0, 0);  // Will be updated by WireGuard on success
+    // Set up callback context (static — only one inject at a time from TailscaleTask)
+    s_inject_ctx.device = device;
+    s_inject_ctx.pcb = device->udp_pcb;
+    s_inject_ctx.p = p;
+    IP_ADDR4(&s_inject_ctx.addr, 0, 0, 0, 0);
 
-    // Call wireguard-lwip's network receive function
-    // This processes the packet just like it came from UDP.
-    // CRITICAL: Must hold lwIP core lock because wireguardif_network_rx()
-    // calls ip_input() which modifies TCP state. Without this lock,
-    // concurrent TCP operations from other tasks would race.
-    extern void wireguardif_network_rx(void *arg, struct udp_pcb *pcb,
-                                        struct pbuf *p, const ip_addr_t *addr, u16_t port);
-    LOCK_TCPIP_CORE();
-    wireguardif_network_rx(device, device->udp_pcb, p, &derp_addr, 0);
-    UNLOCK_TCPIP_CORE();
+    // Run wireguardif_network_rx() inside the tcpip thread for thread safety.
+    // This avoids races with FetchTask's TCP operations without global locking.
+    err_t cb_err = tcpip_try_callback(wg_inject_in_tcpip_thread, &s_inject_ctx);
+    if (cb_err != ERR_OK) {
+        ESP_LOGW(TAG, "tcpip_try_callback failed: %d (mbox full?)", cb_err);
+        pbuf_free(p);
+        return ESP_ERR_NO_MEM;
+    }
 
-    // Note: wireguardif_network_rx frees the pbuf
+    // Block until the tcpip thread processes the packet
+    if (xSemaphoreTake(s_inject_done, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        ESP_LOGW(TAG, "DERP inject timed out (tcpip thread stuck?)");
+        // pbuf ownership transferred to callback — wireguardif_network_rx will free it
+        return ESP_ERR_TIMEOUT;
+    }
 
-    ESP_LOGD(TAG, "Injected %zu byte DERP packet for WireGuard processing", len);
+    ESP_LOGD(TAG, "Injected %zu byte DERP packet via tcpip thread", len);
     return ESP_OK;
 }
 

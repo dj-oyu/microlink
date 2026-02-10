@@ -2184,6 +2184,9 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
         ESP_LOGE(TAG, "Registration error: %s", error->valuestring);
         cJSON_Delete(root);
         free(h2_buffer);
+        // Return ESP_ERR_NOT_ALLOWED for permanent errors (invalid key, etc.)
+        // so the caller can distinguish from transient network failures
+        ret = ESP_ERR_NOT_ALLOWED;
         goto cleanup;
     }
 

@@ -79,6 +79,10 @@ void microlink_state_machine(microlink_t *ml) {
                 // Send MapRequest IMMEDIATELY after registration to keep connection alive
                 // DERPRegion will be 0 initially, we'll update later
                 microlink_set_state(ml, MICROLINK_STATE_FETCHING_PEERS);
+            } else if (ret == ESP_ERR_NOT_ALLOWED) {
+                // Permanent error (invalid API key, etc.) - no point retrying
+                ESP_LOGE(TAG, "Registration rejected (permanent error)");
+                microlink_set_state(ml, MICROLINK_STATE_ERROR);
             } else if (time_in_state > 30000) {
                 // Timeout after 30 seconds (increased from 10s to allow more retries)
                 ESP_LOGE(TAG, "Registration timeout");
