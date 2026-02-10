@@ -42,7 +42,7 @@ extern "C" {
 
 // Timing constants (milliseconds)
 #define MICROLINK_HEARTBEAT_INTERVAL_MS 25000  // 25 seconds (required by Tailscale to maintain "online" status)
-#define MICROLINK_DISCO_INTERVAL_MS 30000      // 30 seconds
+#define MICROLINK_DISCO_INTERVAL_MS 5000       // 5 seconds (must be < coordination connection lifetime ~22s)
 #define MICROLINK_STUN_INTERVAL_MS 300000      // 5 minutes
 #define MICROLINK_RECONNECT_DELAY_MS 5000      // 5 seconds
 
@@ -59,11 +59,16 @@ extern "C" {
 #define MICROLINK_DERP_SERVER_FALLBACK "derp11.tailscale.com"  // Singapore fallback (region 11)
 #define MICROLINK_DERP_PORT 443
 
-// STUN servers (fallback list)
-#define MICROLINK_STUN_SERVER "stun.tailscale.com"
+// STUN servers
+// Tailscale DERP servers also serve STUN on port 3478 (stun.tailscale.com does NOT exist)
+#define MICROLINK_STUN_SERVER MICROLINK_DERP_SERVER  // derp7.tailscale.com (Tokyo)
 #define MICROLINK_STUN_SERVER_FALLBACK "stun.l.google.com"
 #define MICROLINK_STUN_PORT 3478
 #define MICROLINK_STUN_PORT_GOOGLE 19302
+
+// Hardcoded STUN server IPs (DNS fallback)
+#define MICROLINK_STUN_SERVER_IP       "167.179.89.145"  // derp7.tailscale.com (Tokyo)
+#define MICROLINK_STUN_SERVER_FALLBACK_IP "74.125.250.129"  // stun.l.google.com
 
 /* ============================================================================
  * Type Definitions

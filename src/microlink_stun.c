@@ -5,6 +5,14 @@
  * Discovers public IP and port mapping using STUN protocol.
  * Used by Tailscale for NAT traversal and direct peer connections.
  *
+ * STUN requests are sent through the DISCO PCB (microlink_disco_sendto)
+ * so that the discovered public mapping matches the port used for
+ * both DISCO probes and WireGuard direct packets.
+ *
+ * STUN responses are delivered asynchronously by the DISCO PCB recv
+ * callback into ml->disco.stun_resp_data/stun_resp_ready.  The probe
+ * function polls this flag with vTaskDelay().
+ *
  * STUN message format:
  *   [2B type][2B length][4B magic cookie 0x2112A442][12B transaction ID]
  *   [attributes...]
@@ -16,10 +24,8 @@
 #include "microlink_internal.h"
 #include "esp_log.h"
 #include <string.h>
-#include <sys/socket.h>
 #include <netdb.h>
-#include <lwip/sockets.h>
-#include <errno.h>
+#include <lwip/inet.h>
 
 static const char *TAG = "ml_stun";
 
@@ -43,7 +49,7 @@ static const char *TAG = "ml_stun";
 
 /* Timeouts */
 #define STUN_TIMEOUT_MS         3000
-#define STUN_RETRY_COUNT        3
+#define STUN_POLL_INTERVAL_MS   10
 
 /* Static transaction ID storage */
 static uint8_t stun_transaction_id[STUN_TRANSACTION_ID_LEN];
@@ -71,7 +77,6 @@ static size_t stun_build_binding_request(uint8_t *buf, size_t buf_size) {
     buf[7] = 0x42;
 
     // Transaction ID: 12 random bytes
-    // Use simple PRNG for transaction ID (esp_random)
     uint32_t r = esp_random();
     for (int i = 0; i < STUN_TRANSACTION_ID_LEN; i++) {
         if (i % 4 == 0 && i > 0) {
@@ -140,8 +145,6 @@ static int stun_parse_binding_response(const uint8_t *buf, size_t len,
         ESP_LOGD(TAG, "Attribute: type=0x%04x len=%u", attr_type, attr_len);
 
         if (attr_type == STUN_ATTR_XOR_MAPPED_ADDRESS && attr_len >= 8) {
-            // XOR-MAPPED-ADDRESS format:
-            // [1B reserved][1B family][2B X-Port][4B X-Address (for IPv4)]
             uint8_t family = ptr[1];
 
             if (family == STUN_ADDR_FAMILY_IPV4) {
@@ -166,7 +169,6 @@ static int stun_parse_binding_response(const uint8_t *buf, size_t len,
             }
         } else if (attr_type == STUN_ATTR_MAPPED_ADDRESS && attr_len >= 8) {
             // Fallback: MAPPED-ADDRESS (RFC 3489, not XORed)
-            // Some servers still include this for backwards compatibility
             uint8_t family = ptr[1];
 
             if (family == STUN_ADDR_FAMILY_IPV4) {
@@ -194,63 +196,68 @@ static int stun_parse_binding_response(const uint8_t *buf, size_t len,
 }
 
 esp_err_t microlink_stun_init(microlink_t *ml) {
-    ESP_LOGI(TAG, "Initializing STUN client");
+    ESP_LOGI(TAG, "Initializing STUN client (async via DISCO PCB)");
 
     memset(&ml->stun, 0, sizeof(microlink_stun_t));
-    ml->stun.sock_fd = -1;
 
-    // Create UDP socket
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "Failed to create UDP socket: %d", errno);
-        return ESP_FAIL;
+    // STUN now uses the DISCO PCB for sending (microlink_disco_sendto)
+    // and the DISCO PCB recv callback delivers responses to
+    // ml->disco.stun_resp_data/stun_resp_ready.
+    // No socket or PCB of our own needed.
+
+    if (!ml->disco.pcb) {
+        ESP_LOGW(TAG, "DISCO PCB not ready — STUN will fail until DISCO is initialized");
+    } else {
+        ESP_LOGI(TAG, "STUN client ready (sharing DISCO PCB port %u)", ml->disco.port);
     }
 
-    // Set socket timeout
-    struct timeval tv;
-    tv.tv_sec = STUN_TIMEOUT_MS / 1000;
-    tv.tv_usec = (STUN_TIMEOUT_MS % 1000) * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    ml->stun.sock_fd = sock;
-
-    ESP_LOGI(TAG, "STUN client initialized, socket=%d", sock);
     return ESP_OK;
 }
 
 esp_err_t microlink_stun_deinit(microlink_t *ml) {
     ESP_LOGI(TAG, "Deinitializing STUN client");
-
-    if (ml->stun.sock_fd >= 0) {
-        close(ml->stun.sock_fd);
-        ml->stun.sock_fd = -1;
-    }
-
     memset(&ml->stun, 0, sizeof(microlink_stun_t));
     return ESP_OK;
 }
 
 /**
- * @brief Try STUN probe to a specific server
- * @return ESP_OK on success, ESP_FAIL on failure
+ * @brief Try STUN probe to a specific server (async via DISCO PCB)
+ *
+ * Sends the STUN binding request via microlink_disco_sendto() and then
+ * polls ml->disco.stun_resp_ready with vTaskDelay() until a response
+ * arrives or the timeout expires.
  */
 static esp_err_t stun_probe_server(microlink_t *ml, const char *server, uint16_t port) {
-    ESP_LOGI(TAG, "Trying STUN server %s:%d", server, port);
-
-    // Resolve STUN server hostname
-    struct hostent *he = gethostbyname(server);
-    if (he == NULL) {
-        ESP_LOGW(TAG, "Failed to resolve %s", server);
-        return ESP_FAIL;
+    if (!ml->disco.pcb) {
+        ESP_LOGE(TAG, "DISCO PCB not available for STUN");
+        return ESP_ERR_INVALID_STATE;
     }
 
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    memcpy(&server_addr.sin_addr, he->h_addr_list[0], sizeof(server_addr.sin_addr));
+    ESP_LOGI(TAG, "Trying STUN server %s:%d (via DISCO PCB)", server, port);
 
-    ESP_LOGD(TAG, "STUN server IP: %s", inet_ntoa(*(struct in_addr *)he->h_addr_list[0]));
+    // Resolve STUN server hostname
+    uint32_t server_ip_nbo = 0;
+    struct hostent *he = gethostbyname(server);
+    if (he != NULL) {
+        memcpy(&server_ip_nbo, he->h_addr_list[0], sizeof(server_ip_nbo));
+        ESP_LOGI(TAG, "STUN server resolved: %s -> %s",
+                 server, inet_ntoa(*(struct in_addr *)he->h_addr_list[0]));
+    } else {
+        // DNS failed - try hardcoded fallback IP
+        const char *fallback_ip = NULL;
+        if (strcmp(server, MICROLINK_STUN_SERVER) == 0) {
+            fallback_ip = MICROLINK_STUN_SERVER_IP;
+        } else if (strcmp(server, MICROLINK_STUN_SERVER_FALLBACK) == 0) {
+            fallback_ip = MICROLINK_STUN_SERVER_FALLBACK_IP;
+        }
+        if (fallback_ip) {
+            ESP_LOGW(TAG, "DNS failed for %s, using fallback IP %s", server, fallback_ip);
+            server_ip_nbo = inet_addr(fallback_ip);
+        } else {
+            ESP_LOGW(TAG, "Failed to resolve %s (no fallback)", server);
+            return ESP_FAIL;
+        }
+    }
 
     // Build STUN Binding Request
     uint8_t request[STUN_HEADER_SIZE];
@@ -260,82 +267,70 @@ static esp_err_t stun_probe_server(microlink_t *ml, const char *server, uint16_t
         return ESP_FAIL;
     }
 
-    // Retry loop
-    uint8_t response[256];
-    int retries = STUN_RETRY_COUNT;
+    // Clear any stale response
+    __atomic_store_n(&ml->disco.stun_resp_ready, false, __ATOMIC_RELEASE);
 
-    while (retries > 0) {
-        // Send request
-        ssize_t sent = sendto(ml->stun.sock_fd, request, req_len, 0,
-                              (struct sockaddr *)&server_addr, sizeof(server_addr));
-        if (sent < 0) {
-            ESP_LOGE(TAG, "Failed to send STUN request: %d", errno);
-            retries--;
-            continue;
-        }
-
-        ESP_LOGD(TAG, "Sent STUN Binding Request (%zd bytes)", sent);
-
-        // Receive response
-        struct sockaddr_in from_addr;
-        socklen_t from_len = sizeof(from_addr);
-        ssize_t recv_len = recvfrom(ml->stun.sock_fd, response, sizeof(response), 0,
-                                    (struct sockaddr *)&from_addr, &from_len);
-
-        if (recv_len < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                ESP_LOGW(TAG, "STUN timeout, retrying (%d left)", retries - 1);
-                retries--;
-                continue;
-            }
-            ESP_LOGE(TAG, "Failed to receive STUN response: %d", errno);
-            retries--;
-            continue;
-        }
-
-        ESP_LOGD(TAG, "Received STUN response (%zd bytes)", recv_len);
-
-        // Parse response
-        uint32_t mapped_ip = 0;
-        uint16_t mapped_port = 0;
-
-        if (stun_parse_binding_response(response, recv_len, &mapped_ip, &mapped_port) == 0) {
-            // Success!
-            ml->stun.public_ip = mapped_ip;
-            ml->stun.public_port = mapped_port;
-            ml->stun.nat_detected = true;
-            ml->stun.last_probe_ms = microlink_get_time_ms();
-
-            ESP_LOGI(TAG, "STUN probe successful: public endpoint %lu.%lu.%lu.%lu:%u",
-                     (mapped_ip >> 24) & 0xFF,
-                     (mapped_ip >> 16) & 0xFF,
-                     (mapped_ip >> 8) & 0xFF,
-                     mapped_ip & 0xFF,
-                     mapped_port);
-
-            return ESP_OK;
-        }
-
-        retries--;
+    // Send via DISCO PCB (dispatched to tcpip_thread)
+    esp_err_t send_ret = microlink_disco_sendto(ml, server_ip_nbo, port, request, req_len);
+    if (send_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send STUN request via DISCO PCB: %d", send_ret);
+        return ESP_FAIL;
     }
 
+    ESP_LOGD(TAG, "Sent STUN Binding Request (%zu bytes) via DISCO PCB", req_len);
+
+    // Poll for response (async — DISCO PCB callback sets stun_resp_ready)
+    uint64_t start = microlink_get_time_ms();
+    while (microlink_get_time_ms() - start < STUN_TIMEOUT_MS) {
+        if (__atomic_load_n(&ml->disco.stun_resp_ready, __ATOMIC_ACQUIRE)) {
+            // Response arrived
+            uint32_t mapped_ip = 0;
+            uint16_t mapped_port = 0;
+
+            if (stun_parse_binding_response(ml->disco.stun_resp_data,
+                                             ml->disco.stun_resp_len,
+                                             &mapped_ip, &mapped_port) == 0) {
+                ml->stun.public_ip = mapped_ip;
+                ml->stun.public_port = mapped_port;
+                ml->stun.nat_detected = true;
+                ml->stun.last_probe_ms = microlink_get_time_ms();
+
+                ESP_LOGI(TAG, "STUN probe successful: public endpoint %lu.%lu.%lu.%lu:%u",
+                         (mapped_ip >> 24) & 0xFF,
+                         (mapped_ip >> 16) & 0xFF,
+                         (mapped_ip >> 8) & 0xFF,
+                         mapped_ip & 0xFF,
+                         mapped_port);
+
+                return ESP_OK;
+            }
+
+            // Parse failed — don't keep polling
+            ESP_LOGW(TAG, "STUN response parse failed");
+            return ESP_FAIL;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(STUN_POLL_INTERVAL_MS));
+    }
+
+    ESP_LOGW(TAG, "STUN timeout (no response within %d ms)", STUN_TIMEOUT_MS);
     return ESP_FAIL;
 }
 
 esp_err_t microlink_stun_probe(microlink_t *ml) {
-    if (ml->stun.sock_fd < 0) {
-        ESP_LOGE(TAG, "STUN socket not initialized");
+    if (!ml->disco.pcb) {
+        ESP_LOGE(TAG, "DISCO PCB not initialized — cannot send STUN");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Try primary STUN server first (Tailscale)
-    if (stun_probe_server(ml, MICROLINK_STUN_SERVER, MICROLINK_STUN_PORT) == ESP_OK) {
+    // Try Google STUN first (reliable, fast response)
+    if (stun_probe_server(ml, MICROLINK_STUN_SERVER_FALLBACK, MICROLINK_STUN_PORT_GOOGLE) == ESP_OK) {
         return ESP_OK;
     }
 
-    // Try fallback server (Google)
-    ESP_LOGW(TAG, "Primary STUN server failed, trying fallback...");
-    if (stun_probe_server(ml, MICROLINK_STUN_SERVER_FALLBACK, MICROLINK_STUN_PORT_GOOGLE) == ESP_OK) {
+    // Try DERP server STUN as fallback
+    ESP_LOGW(TAG, "Google STUN failed, trying DERP server...");
+    if (stun_probe_server(ml, MICROLINK_STUN_SERVER, MICROLINK_STUN_PORT) == ESP_OK) {
         return ESP_OK;
     }
 

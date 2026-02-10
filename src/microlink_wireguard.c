@@ -40,6 +40,29 @@ static const char *TAG = "ml_wg";
 /* Forward declaration for DERP output callback */
 static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8_t *data, size_t len, void *ctx);
 
+/**
+ * @brief Direct output callback: sends WG packets through the DISCO PCB
+ *        (critical for NAT traversal — same source port as DISCO probes).
+ *
+ * This runs inside the tcpip_thread context (called from wireguardif_peer_output),
+ * so we use raw lwIP udp_sendto() directly.  The DISCO PCB is shared for
+ * receiving (demux callback) and sending (WG output + DISCO probes + STUN).
+ */
+static err_t wg_direct_output_callback(const uint8_t *data, size_t len,
+                                        const ip_addr_t *dest_ip, u16_t dest_port, void *ctx) {
+    microlink_t *ml = (microlink_t *)ctx;
+    if (!ml || !ml->disco.pcb) return ERR_IF;
+
+    struct udp_pcb *pcb = (struct udp_pcb *)ml->disco.pcb;
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
+    if (!p) return ERR_MEM;
+
+    memcpy(p->payload, data, len);
+    err_t err = udp_sendto(pcb, p, dest_ip, dest_port);
+    pbuf_free(p);
+    return err;
+}
+
 /* ============================================================================
  * Thread-safe DERP Packet Injection via tcpip_callback
  *
@@ -54,16 +77,19 @@ typedef struct {
     struct udp_pcb *pcb;
     struct pbuf *p;
     ip_addr_t addr;
+    u16_t port;
 } wg_inject_ctx_t;
 
+/* Synchronous injection for DERP packets (low volume, needs ordering guarantees) */
 static wg_inject_ctx_t s_inject_ctx;
 static SemaphoreHandle_t s_inject_done = NULL;
 
+extern void wireguardif_network_rx(void *arg, struct udp_pcb *pcb,
+                                    struct pbuf *p, const ip_addr_t *addr, u16_t port);
+
 static void wg_inject_in_tcpip_thread(void *arg) {
     wg_inject_ctx_t *ctx = (wg_inject_ctx_t *)arg;
-    extern void wireguardif_network_rx(void *arg, struct udp_pcb *pcb,
-                                        struct pbuf *p, const ip_addr_t *addr, u16_t port);
-    wireguardif_network_rx(ctx->device, ctx->pcb, ctx->p, &ctx->addr, 0);
+    wireguardif_network_rx(ctx->device, ctx->pcb, ctx->p, &ctx->addr, ctx->port);
     xSemaphoreGive(s_inject_done);
 }
 
@@ -351,8 +377,29 @@ esp_err_t microlink_wireguard_init(microlink_t *ml) {
     ESP_LOGI(TAG, "Registering DERP output callback for WireGuard");
     wireguardif_set_derp_output((struct netif *)ml->wireguard.netif, wg_derp_output_callback, ml);
 
+    // NOTE: direct_output callback is registered later by microlink_wireguard_enable_direct_output()
+    // after DISCO init creates the raw PCB we need to send through.
+
     ESP_LOGI(TAG, "WireGuard interface initialized on port %d", ml->wireguard.listen_port);
 
+    return ESP_OK;
+}
+
+esp_err_t microlink_wireguard_enable_direct_output(microlink_t *ml) {
+    if (!ml || !ml->wireguard.initialized || !ml->wireguard.netif) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!ml->disco.pcb) {
+        ESP_LOGW(TAG, "DISCO PCB not ready, cannot enable direct output");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // The DISCO PCB is shared for both receiving (zero-copy demux) and sending.
+    // WG direct output uses the same PCB so the source port matches the
+    // STUN-discovered NAT mapping and DISCO probe port.
+    ESP_LOGI(TAG, "Enabling WG direct output via DISCO PCB port %u", ml->disco.port);
+    wireguardif_set_direct_output((struct netif *)ml->wireguard.netif,
+                                  wg_direct_output_callback, ml);
     return ESP_OK;
 }
 
@@ -487,6 +534,8 @@ esp_err_t microlink_wireguard_update_endpoint(microlink_t *ml, uint32_t vpn_ip,
         return ESP_ERR_INVALID_STATE;
     }
 
+    struct netif *netif = (struct netif *)ml->wireguard.netif;
+
     // Find peer index by VPN IP
     uint8_t last_byte = vpn_ip & 0xFF;
     if (last_byte >= MICROLINK_PEER_MAP_SIZE) {
@@ -498,13 +547,25 @@ esp_err_t microlink_wireguard_update_endpoint(microlink_t *ml, uint32_t vpn_ip,
         return ESP_ERR_NOT_FOUND;
     }
 
+    // Skip if endpoint is unchanged (avoid redundant handshake initiation)
+    ip_addr_t current_ip;
+    u16_t current_port;
+    if (wireguardif_peer_is_up(netif, peer_index, &current_ip, &current_port) == ERR_OK) {
+        uint32_t current_ml_ip = lwip_ip_to_microlink(&current_ip);
+        if (current_ml_ip == endpoint_ip && current_port == endpoint_port) {
+            ESP_LOGD(TAG, "Endpoint unchanged (%u.%u.%u.%u:%u), skipping",
+                     (endpoint_ip >> 24) & 0xFF, (endpoint_ip >> 16) & 0xFF,
+                     (endpoint_ip >> 8) & 0xFF, endpoint_ip & 0xFF, endpoint_port);
+            return ESP_OK;
+        }
+    }
+
     // Convert endpoint IP to lwIP format
     ip_addr_t lwip_endpoint;
     microlink_ip_to_lwip(endpoint_ip, &lwip_endpoint);
 
     // Update peer endpoint
-    err_t err = wireguardif_update_endpoint((struct netif *)ml->wireguard.netif,
-                                             peer_index, &lwip_endpoint, endpoint_port);
+    err_t err = wireguardif_update_endpoint(netif, peer_index, &lwip_endpoint, endpoint_port);
     if (err != ERR_OK) {
         ESP_LOGE(TAG, "Failed to update endpoint: lwIP error %d", err);
         return ESP_FAIL;
@@ -517,8 +578,8 @@ esp_err_t microlink_wireguard_update_endpoint(microlink_t *ml, uint32_t vpn_ip,
              endpoint_ip & 0xFF,
              endpoint_port);
 
-    // Now initiate handshake with the new endpoint
-    err = wireguardif_connect((struct netif *)ml->wireguard.netif, peer_index);
+    // Initiate handshake with the NEW endpoint
+    err = wireguardif_connect(netif, peer_index);
     if (err != ERR_OK) {
         ESP_LOGW(TAG, "Failed to initiate handshake after endpoint update: %d", err);
         return ESP_FAIL;

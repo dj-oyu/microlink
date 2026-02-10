@@ -157,18 +157,50 @@ typedef struct {
  * @brief STUN client state
  */
 typedef struct {
-    int sock_fd;                        ///< UDP socket for STUN
-    void *netif;                        ///< lwIP network interface (struct netif*)
-    uint32_t public_ip;                 ///< Discovered public IP
+    uint32_t public_ip;                 ///< Discovered public IP (host byte order)
     uint16_t public_port;               ///< Discovered public port
     uint64_t last_probe_ms;
     bool nat_detected;
 } microlink_stun_t;
 
 /**
+ * @brief DISCO RX ring buffer entry (SPSC: tcpip_thread → microlink task)
+ *
+ * Used for DISCO control packets (PING/PONG/CallMeMaybe).
+ * WG transport packets bypass this ring buffer entirely (zero-copy to WG).
+ */
+#define DISCO_RX_RING_SIZE      8
+#define DISCO_RX_MAX_PKT_SIZE   256     ///< DISCO packets are small (~100-200B)
+
+typedef struct {
+    uint8_t data[DISCO_RX_MAX_PKT_SIZE];
+    uint16_t len;
+    uint32_t src_ip_nbo;                ///< Source IP in network byte order
+    uint16_t src_port;                  ///< Source port in host byte order
+} disco_rx_entry_t;
+
+/**
  * @brief DISCO protocol state
+ *
+ * Uses a raw lwIP UDP PCB instead of a BSD socket.  The PCB recv callback
+ * runs in tcpip_thread: WG packets go directly to wireguardif_network_rx()
+ * (zero-copy), while DISCO/STUN control packets are copied to an SPSC
+ * ring buffer for the microlink task to process.
  */
 typedef struct {
+    void *pcb;                          ///< Raw lwIP UDP PCB (struct udp_pcb*)
+    uint16_t port;                      ///< Bound port (host byte order)
+
+    // SPSC lock-free ring buffer: producer=tcpip_thread, consumer=microlink task
+    disco_rx_entry_t rx_ring[DISCO_RX_RING_SIZE];
+    volatile uint8_t rx_head;           ///< Written by producer (__ATOMIC_RELEASE)
+    volatile uint8_t rx_tail;           ///< Written by consumer (__ATOMIC_RELEASE)
+
+    // Dedicated STUN response buffer (set by PCB recv callback)
+    uint8_t stun_resp_data[128];        ///< STUN responses are ~48 bytes
+    uint16_t stun_resp_len;
+    volatile bool stun_resp_ready;      ///< True when a STUN response is available
+
     // Per-peer DISCO state
     struct {
         uint64_t last_probe_ms;
@@ -180,7 +212,7 @@ typedef struct {
 } microlink_disco_t;
 
 /**
- * @brief WireGuard state (placeholder for library integration)
+ * @brief WireGuard state
  */
 typedef struct {
     uint8_t private_key[32];
@@ -280,12 +312,17 @@ esp_err_t microlink_stun_probe(microlink_t *ml);
 esp_err_t microlink_disco_init(microlink_t *ml);
 esp_err_t microlink_disco_deinit(microlink_t *ml);
 esp_err_t microlink_disco_probe_peers(microlink_t *ml);
+esp_err_t microlink_disco_receive(microlink_t *ml);
 esp_err_t microlink_disco_update_paths(microlink_t *ml);
 esp_err_t microlink_disco_handle_derp_packet(microlink_t *ml, const uint8_t *src_key,
                                               const uint8_t *data, size_t len);
 bool microlink_disco_is_disco_packet(const uint8_t *data, size_t len);
+esp_err_t microlink_disco_handle_direct_packet(microlink_t *ml, const uint8_t *data, size_t len,
+                                                uint32_t src_ip, uint16_t src_port);
+esp_err_t microlink_disco_sendto(microlink_t *ml, uint32_t dest_ip_nbo, uint16_t dest_port,
+                                  const uint8_t *data, size_t len);
 
-// WireGuard wrapper (will integrate with WireGuard-ESP32-Arduino)
+// WireGuard wrapper
 esp_err_t microlink_wireguard_init(microlink_t *ml);
 esp_err_t microlink_wireguard_deinit(microlink_t *ml);
 esp_err_t microlink_wireguard_add_peer(microlink_t *ml, const microlink_peer_t *peer);
@@ -299,6 +336,7 @@ esp_err_t microlink_wireguard_inject_derp_packet(microlink_t *ml, uint32_t src_v
 void microlink_wireguard_get_public_key(const microlink_t *ml, uint8_t *public_key);
 esp_err_t microlink_wireguard_set_vpn_ip(microlink_t *ml, uint32_t vpn_ip);
 void microlink_wireguard_process_derp_queue(void);
+esp_err_t microlink_wireguard_enable_direct_output(microlink_t *ml);
 
 // Utility functions
 uint64_t microlink_get_time_ms(void);

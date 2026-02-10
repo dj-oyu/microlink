@@ -284,13 +284,14 @@ void microlink_state_machine(microlink_t *ml) {
                 ml->coordination.last_map_poll_ms = now_ms;
             }
 
-            // Run DISCO probes if enabled
-            // NOTE: Core 1 handles coordination, so DISCO can run freely on Core 0
+            // Drain DISCO socket every iteration — WG handshake responses and transport
+            // packets arrive here and must be forwarded to WG promptly
             if (ml->config.enable_disco) {
+                microlink_disco_receive(ml);
+
                 uint64_t since_disco = now_ms - ml->disco.last_global_disco_ms;
                 if (since_disco >= MICROLINK_DISCO_INTERVAL_MS) {
                     microlink_disco_probe_peers(ml);
-                    // No longer need to poll coordination here - Core 1 handles it!
                     microlink_disco_update_paths(ml);
                     ml->disco.last_global_disco_ms = now_ms;
                 }

@@ -3446,16 +3446,15 @@ esp_err_t microlink_coordination_heartbeat(microlink_t *ml) {
     // "online" status. Sending Stream=false requests on the same HTTP/2 connection
     // breaks the protocol and causes the server to close the connection.
     //
-    // We only need to send endpoint updates when we have NEW STUN-discovered endpoints.
-    // Since STUN discovery isn't working yet, skip the heartbeat to keep the connection alive.
-    if (ml->stun.public_ip == 0 || ml->stun.public_port == 0) {
-        ESP_LOGI(TAG, "Heartbeat skipped: no STUN endpoints to advertise (long-poll maintains online status)");
-        ml->coordination.last_heartbeat_ms = microlink_get_time_ms();
-        return ESP_OK;
-    }
+    // Endpoints are already advertised in the initial MapRequest (Stream=false)
+    // during FETCHING_PEERS state. Do NOT send another MapRequest here.
+    // If STUN discovers new endpoints, the next reconnect cycle will advertise them.
+    ESP_LOGD(TAG, "Heartbeat skipped: long-poll maintains online status, endpoints in initial MapRequest");
+    ml->coordination.last_heartbeat_ms = microlink_get_time_ms();
+    return ESP_OK;
 
-    ESP_LOGI(TAG, "Sending endpoint update (Stream=false, OmitPeers=true)");
-    ESP_LOGI(TAG, "Socket %d appears valid, sending heartbeat...", sock);
+    // === Dead code below: kept for reference if separate-connection heartbeat is needed ===
+    ESP_LOGI(TAG, "Socket %d sending endpoint update...", sock);
 
     // Build MapRequest to advertise our endpoints
     // CRITICAL: Per Tailscale protocol (capver >= 68), Stream=true means server

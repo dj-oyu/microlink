@@ -64,19 +64,20 @@ const char *microlink_state_to_str(microlink_state_t state) {
 }
 
 uint8_t microlink_peer_find_by_vpn_ip(const microlink_t *ml, uint32_t vpn_ip) {
+    // Fast path: peer_map lookup by last byte of VPN IP
     uint8_t last_byte = vpn_ip & 0xFF;
-    if (last_byte >= MICROLINK_PEER_MAP_SIZE) {
-        return 0xFF;  // Invalid
+    if (last_byte < MICROLINK_PEER_MAP_SIZE) {
+        uint8_t idx = ml->peer_map[last_byte];
+        if (idx < ml->peer_count && ml->peers[idx].vpn_ip == vpn_ip) {
+            return idx;
+        }
     }
 
-    uint8_t idx = ml->peer_map[last_byte];
-    if (idx >= ml->peer_count) {
-        return 0xFF;  // Not found
-    }
-
-    // Verify match
-    if (ml->peers[idx].vpn_ip == vpn_ip) {
-        return idx;
+    // Fallback: linear scan (peer_map may be overwritten by WG peer index)
+    for (uint8_t i = 0; i < ml->peer_count; i++) {
+        if (ml->peers[i].vpn_ip == vpn_ip) {
+            return i;
+        }
     }
 
     return 0xFF;  // Not found
@@ -218,6 +219,18 @@ esp_err_t microlink_connect(microlink_t *ml) {
     }
 
     // 3. Initialize optional subsystems
+    // DISCO must init BEFORE STUN so they share the same raw PCB
+    // (STUN discovers the public mapping of DISCO's port for NAT traversal)
+    if (ml->config.enable_disco) {
+        ret = microlink_disco_init(ml);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "DISCO init failed, continuing without: %d", ret);
+        } else {
+            // DISCO PCB is now ready — route WG output through it for port consistency
+            microlink_wireguard_enable_direct_output(ml);
+        }
+    }
+
     if (ml->config.enable_stun) {
         ret = microlink_stun_init(ml);
         if (ret != ESP_OK) {
@@ -229,13 +242,6 @@ esp_err_t microlink_connect(microlink_t *ml) {
         ret = microlink_derp_init(ml);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "DERP init failed, continuing without: %d", ret);
-        }
-    }
-
-    if (ml->config.enable_disco) {
-        ret = microlink_disco_init(ml);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "DISCO init failed, continuing without: %d", ret);
         }
     }
 
