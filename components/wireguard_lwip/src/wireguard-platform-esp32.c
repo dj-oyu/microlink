@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "lwip/sys.h"
 #include <string.h>
+#include <sys/time.h>
 
 /* ============================================================================
  * Time Functions
@@ -20,10 +21,14 @@ uint32_t wireguard_sys_now() {
 
 void wireguard_tai64n_now(uint8_t *output) {
     // TAI64N format: 8 bytes seconds + 4 bytes nanoseconds
-    // For simplicity, use Unix epoch time
-    uint64_t now_us = esp_timer_get_time();
-    uint64_t seconds = now_us / 1000000ULL;
-    uint32_t nanoseconds = (now_us % 1000000ULL) * 1000;
+    // MUST use real wall-clock time (not uptime) because WireGuard peers
+    // reject handshakes with timestamps older than previously seen.
+    // Using esp_timer_get_time() (uptime) would reset to 0 on reboot,
+    // causing all handshakes to be rejected as replay attacks.
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    uint64_t seconds = (uint64_t)tv.tv_sec;
+    uint32_t nanoseconds = (uint32_t)tv.tv_usec * 1000;
 
     // TAI64 starts at 1970-01-01 00:00:10 TAI (Unix epoch + 10 seconds)
     // Add TAI offset: 2^62 + Unix time

@@ -143,6 +143,9 @@ typedef struct {
     uint8_t max_peers;                  ///< Max peers (default: 4)
     uint32_t heartbeat_interval_ms;     ///< Heartbeat interval (default: 60000)
 
+    // Peer filter (optional)
+    const char *target_hostname;        ///< Only add this peer to WG (prefix match, NULL = all)
+
     // Callbacks (optional)
     void (*on_connected)(void);         ///< Connected callback
     void (*on_disconnected)(void);      ///< Disconnected callback

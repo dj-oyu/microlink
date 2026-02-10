@@ -128,6 +128,13 @@ void microlink_state_machine(microlink_t *ml) {
 
             // Add peers to WireGuard (handshake via DERP if no direct endpoint)
             for (uint8_t i = 0; i < ml->peer_count; i++) {
+                // Filter by target_hostname if configured (prefix match)
+                if (ml->config.target_hostname &&
+                    strncmp(ml->peers[i].hostname, ml->config.target_hostname,
+                            strlen(ml->config.target_hostname)) != 0) {
+                    ESP_LOGI(TAG, "Skipping non-target peer: %s", ml->peers[i].hostname);
+                    continue;
+                }
                 esp_err_t ret = microlink_wireguard_add_peer(ml, &ml->peers[i]);
                 if (ret != ESP_OK) {
                     ESP_LOGW(TAG, "Failed to add peer %d", i);

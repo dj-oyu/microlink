@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "lwip/netif.h"
 #include "lwip/ip_addr.h"
 #include "lwip/err.h"
@@ -121,12 +122,19 @@ microlink_t *microlink_init(const microlink_config_t *config) {
         return NULL;
     }
 
-    // Allocate context
-    microlink_t *ml = calloc(1, sizeof(microlink_t));
+    // Allocate context in SPIRAM to avoid internal SRAM exhaustion.
+    // sizeof(microlink_t) ≈ 32KB due to embedded packet queues (16×1520B)
+    // and peer arrays. Internal SRAM is needed for SDIO/WiFi DMA queues.
+    microlink_t *ml = heap_caps_calloc(1, sizeof(microlink_t), MALLOC_CAP_SPIRAM);
     if (!ml) {
-        ESP_LOGE(TAG, "Failed to allocate context");
+        ESP_LOGW(TAG, "SPIRAM alloc failed, falling back to internal heap");
+        ml = calloc(1, sizeof(microlink_t));
+    }
+    if (!ml) {
+        ESP_LOGE(TAG, "Failed to allocate context (%u bytes)", (unsigned)sizeof(microlink_t));
         return NULL;
     }
+    ESP_LOGI(TAG, "Context allocated: %u bytes at %p", (unsigned)sizeof(microlink_t), ml);
 
     // Copy configuration
     memcpy(&ml->config, config, sizeof(microlink_config_t));
@@ -305,6 +313,8 @@ esp_err_t microlink_update(microlink_t *ml) {
 
     if (ml->config.enable_derp) {
         microlink_derp_receive(ml);
+        // Flush ACKs queued during DERP receive (TCP ACKs from incoming data)
+        microlink_wireguard_process_derp_queue();
     }
 
     return ESP_OK;

@@ -59,7 +59,7 @@ static const char *TAG = "ml_derp";
 
 /* Timeouts */
 #define DERP_CONNECT_TIMEOUT_MS 10000
-#define DERP_READ_TIMEOUT_MS    100
+#define DERP_READ_TIMEOUT_MS    10
 #define DERP_KEEPALIVE_MS       30000
 
 /* Maximum frame size */
@@ -182,32 +182,13 @@ static int derp_tls_read_all(microlink_t *ml, uint8_t *data, size_t len, int tim
 }
 
 /**
- * @brief Send a DERP frame (thread-safe with mutex)
+ * @brief Send a DERP frame
+ *
+ * No mutex needed: all DERP TLS operations (send/recv) run exclusively
+ * in TailscaleTask. The tcpip thread never accesses TLS directly
+ * (it uses the deferred DERP queue instead).
  */
 static esp_err_t derp_send_frame(microlink_t *ml, uint8_t type, const uint8_t *payload, uint32_t len) {
-    ESP_LOGI(TAG, "[FRAME] >> type=0x%02x len=%lu", type, (unsigned long)len);
-
-    // Initialize mutex on first use (static allocation for RTOS safety)
-    if (derp_tls_mutex == NULL) {
-        ESP_LOGI(TAG, "[FRAME] Creating TLS mutex");
-        derp_tls_mutex = xSemaphoreCreateMutexStatic(&derp_tls_mutex_buffer);
-        if (derp_tls_mutex == NULL) {
-            ESP_LOGE(TAG, "Failed to create DERP TLS mutex");
-            return ESP_FAIL;
-        }
-    }
-
-    // Take mutex with SHORT timeout - if receive is in progress, skip this send
-    // The WireGuard layer will retry, so it's okay to drop occasional sends
-    // This mutex protects the entire SSL context (both read and write)
-    ESP_LOGI(TAG, "[FRAME] TLS mutex take...");
-    if (xSemaphoreTake(derp_tls_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-        ESP_LOGW(TAG, "DERP TLS mutex busy - dropping send (WG will retry)");
-        return ESP_ERR_TIMEOUT;
-    }
-    ESP_LOGI(TAG, "[FRAME] TLS mutex OK");
-
-    esp_err_t result = ESP_OK;
     uint8_t header[5];
     header[0] = type;
     header[1] = (len >> 24) & 0xFF;
@@ -215,33 +196,19 @@ static esp_err_t derp_send_frame(microlink_t *ml, uint8_t type, const uint8_t *p
     header[3] = (len >> 8) & 0xFF;
     header[4] = len & 0xFF;
 
-    ESP_LOGI(TAG, "[FRAME] hdr write...");
     if (derp_tls_write_all(ml, header, 5) < 0) {
-        ESP_LOGW(TAG, "[FRAME] hdr FAIL");
-        result = ESP_FAIL;
-        goto done;
+        ESP_LOGW(TAG, "DERP frame hdr write failed");
+        return ESP_FAIL;
     }
 
     if (len > 0 && payload != NULL) {
-        ESP_LOGI(TAG, "[FRAME] payload write %lu...", (unsigned long)len);
         if (derp_tls_write_all(ml, payload, len) < 0) {
-            ESP_LOGW(TAG, "[FRAME] payload FAIL");
-            result = ESP_FAIL;
-            goto done;
+            ESP_LOGW(TAG, "DERP frame payload write failed");
+            return ESP_FAIL;
         }
     }
 
-done:
-    ESP_LOGI(TAG, "[FRAME] TLS mutex give");
-    xSemaphoreGive(derp_tls_mutex);
-
-    // CRITICAL: Yield to other tasks after TLS write to prevent starvation
-    // This is especially important when WireGuard fires multiple handshake packets
-    ESP_LOGI(TAG, "[FRAME] yield");
-    vTaskDelay(pdMS_TO_TICKS(1));
-    ESP_LOGI(TAG, "[FRAME] << result=%d", result);
-
-    return result;
+    return ESP_OK;
 }
 
 /**
@@ -956,32 +923,17 @@ esp_err_t microlink_derp_receive(microlink_t *ml) {
         last_recv_debug = now;
     }
 
-    // Initialize mutex if needed (same mutex as send uses)
-    if (derp_tls_mutex == NULL) {
-        derp_tls_mutex = xSemaphoreCreateMutexStatic(&derp_tls_mutex_buffer);
-        if (derp_tls_mutex == NULL) {
-            ESP_LOGE(TAG, "Failed to create DERP TLS mutex in receive");
-            return ESP_FAIL;
-        }
-    }
-
-    // Take mutex for TLS read operations - use short timeout
-    // If send is in progress, skip this receive cycle
-    if (xSemaphoreTake(derp_tls_mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
-        // Send is in progress, skip receive this cycle
-        return ESP_OK;
-    }
+    // No mutex needed: all DERP TLS operations run in TailscaleTask only.
+    // The tcpip thread uses the deferred queue and never accesses TLS directly.
 
     // Try to read a frame (non-blocking with short timeout)
     uint8_t type;
     uint32_t len;
     esp_err_t err = derp_recv_frame_header(ml, &type, &len, DERP_READ_TIMEOUT_MS);
     if (err == ESP_ERR_TIMEOUT) {
-        xSemaphoreGive(derp_tls_mutex);
         return ESP_OK;  // No data available
     }
     if (err != ESP_OK) {
-        xSemaphoreGive(derp_tls_mutex);
         ESP_LOGE(TAG, "DERP connection lost (err=%d)", err);
         ml->derp.connected = false;
         return ESP_FAIL;
@@ -989,7 +941,6 @@ esp_err_t microlink_derp_receive(microlink_t *ml) {
 
     // Sanity check frame length
     if (len > DERP_MAX_FRAME_SIZE) {
-        xSemaphoreGive(derp_tls_mutex);
         ESP_LOGE(TAG, "Frame too large: %lu", len);
         ml->derp.connected = false;
         return ESP_FAIL;
@@ -998,18 +949,13 @@ esp_err_t microlink_derp_receive(microlink_t *ml) {
     // Read frame payload
     if (len > 0) {
         if (derp_tls_read_all(ml, derp_rx_buffer, len, DERP_CONNECT_TIMEOUT_MS) < 0) {
-            xSemaphoreGive(derp_tls_mutex);
             ESP_LOGE(TAG, "Failed to read frame payload");
             ml->derp.connected = false;
             return ESP_FAIL;
         }
     }
 
-    // Release mutex - we've read all the data we need
-    xSemaphoreGive(derp_tls_mutex);
-
-    // Log ALL incoming frames for debugging
-    ESP_LOGI(TAG, "DERP frame received: type=0x%02x len=%lu", type, (unsigned long)len);
+    ESP_LOGD(TAG, "DERP frame received: type=0x%02x len=%lu", type, (unsigned long)len);
 
     // Handle frame by type
     switch (type) {
@@ -1040,7 +986,7 @@ esp_err_t microlink_derp_receive(microlink_t *ml) {
             else if (wg_type == 3) wg_type_str = "COOKIE";
             else if (wg_type == 4) wg_type_str = "TRANSPORT";
 
-            ESP_LOGI(TAG, "Received WG packet via DERP: %zu bytes, type=%s from %02x%02x%02x%02x...",
+            ESP_LOGD(TAG, "Received WG packet via DERP: %zu bytes, type=%s from %02x%02x%02x%02x...",
                      payload_len, wg_type_str, src_key[0], src_key[1], src_key[2], src_key[3]);
 
             // Find peer by public key to get VPN IP (optional for handshakes)
@@ -1048,7 +994,7 @@ esp_err_t microlink_derp_receive(microlink_t *ml) {
             for (int i = 0; i < ml->peer_count; i++) {
                 if (memcmp(ml->peers[i].public_key, src_key, 32) == 0) {
                     src_vpn_ip = ml->peers[i].vpn_ip;
-                    ESP_LOGI(TAG, "  -> Matched peer %d, VPN IP: %d.%d.%d.%d",
+                    ESP_LOGD(TAG, "  -> Matched peer %d, VPN IP: %d.%d.%d.%d",
                              i, (src_vpn_ip >> 24) & 0xFF, (src_vpn_ip >> 16) & 0xFF,
                              (src_vpn_ip >> 8) & 0xFF, src_vpn_ip & 0xFF);
                     break;

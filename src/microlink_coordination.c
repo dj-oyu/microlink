@@ -2367,7 +2367,7 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
     cJSON_AddBoolToObject(netinfo, "WorkingUDP", true);     // We support UDP
     cJSON_AddBoolToObject(netinfo, "WorkingIPv6", false);   // ESP32 doesn't have IPv6 here
     cJSON_AddItemToObject(hostinfo, "NetInfo", netinfo);
-    ESP_LOGI(TAG, "NetInfo.PreferredDERP: %d (Dallas)", MICROLINK_DERP_REGION);
+    ESP_LOGI(TAG, "NetInfo.PreferredDERP: %d (Tokyo)", MICROLINK_DERP_REGION);
 
     cJSON_AddItemToObject(map_req, "Hostinfo", hostinfo);
 
@@ -3194,7 +3194,7 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
                 // Peer has a DERP home region - add as fallback endpoint
                 // Format is typically "127.3.3.40:N" where N is region ID
                 // For now, just note it exists - DERP connection handled separately
-                ESP_LOGD(TAG, "Peer %s has DERP: %s", peer->hostname, derp->valuestring);
+                ESP_LOGI(TAG, "Peer %s has DERP: %s", peer->hostname, derp->valuestring);
             }
 
             // Only add peer if we got essential fields

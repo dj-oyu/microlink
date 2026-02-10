@@ -28,6 +28,7 @@
 #include "lwip/udp.h"      // For udp_remove()
 #include "lwip/pbuf.h"     // For pbuf_alloc()
 #include "lwip/timeouts.h" // For sys_untimeout()
+#include "lwip/tcpip.h"    // For LOCK_TCPIP_CORE()
 
 // External lwIP global
 extern struct netif *netif_list;
@@ -45,7 +46,7 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
  * We queue these packets and send them from the main MicroLink task.
  * ========================================================================== */
 
-#define DERP_QUEUE_SIZE 4
+#define DERP_QUEUE_SIZE 16
 #define DERP_PACKET_MAX_SIZE 256
 
 typedef struct {
@@ -407,15 +408,10 @@ esp_err_t microlink_wireguard_add_peer(microlink_t *ml, const microlink_peer_t *
     IP4_ADDR(&wg_peer.allowed_mask.u_addr.ip4, 255, 255, 255, 255);  // /32 single host
     wg_peer.allowed_mask.type = IPADDR_TYPE_V4;
 
-    // Set endpoint if available
-    if (peer->endpoint_count > 0 && !peer->endpoints[0].is_derp) {
-        microlink_ip_to_lwip(peer->endpoints[0].ip, &wg_peer.endpoint_ip);
-        wg_peer.endport_port = peer->endpoints[0].port;
-    } else {
-        // No direct endpoint, will rely on DERP
-        memset(&wg_peer.endpoint_ip, 0, sizeof(ip_addr_t));
-        wg_peer.endport_port = 0;
-    }
+    // No direct endpoint - always start via DERP relay.
+    // wireguardif_connect_derp will clear peer->ip/port to route through DERP.
+    memset(&wg_peer.endpoint_ip, 0, sizeof(ip_addr_t));
+    wg_peer.endport_port = 0;
 
     // Set keepalive (25 seconds for NAT traversal)
     wg_peer.keep_alive = 25;
@@ -437,30 +433,14 @@ esp_err_t microlink_wireguard_add_peer(microlink_t *ml, const microlink_peer_t *
 
     ESP_LOGI(TAG, "Peer added successfully (index %d)", peer_index);
 
-    // Initiate handshake
-    if (peer->endpoint_count > 0 && !peer->endpoints[0].is_derp) {
-        // Peer has direct endpoint - use standard connect
-        err = wireguardif_connect((struct netif *)ml->wireguard.netif, peer_index);
-        if (err != ERR_OK) {
-            ESP_LOGW(TAG, "Failed to initiate handshake: lwIP error %d", err);
-        } else {
-            ESP_LOGI(TAG, "Handshake initiated to %u.%u.%u.%u:%u",
-                     (peer->endpoints[0].ip >> 24) & 0xFF,
-                     (peer->endpoints[0].ip >> 16) & 0xFF,
-                     (peer->endpoints[0].ip >> 8) & 0xFF,
-                     peer->endpoints[0].ip & 0xFF,
-                     peer->endpoints[0].port);
-        }
-    } else {
-        // DERP-only peer - initiate handshake via DERP
-        // The DERP output callback will route handshake packets through the relay
-        ESP_LOGI(TAG, "Peer has no direct endpoint, initiating handshake via DERP");
-        err = wireguardif_connect_derp((struct netif *)ml->wireguard.netif, peer_index);
-        if (err != ERR_OK) {
-            ESP_LOGW(TAG, "Failed to initiate DERP handshake: lwIP error %d", err);
-        } else {
-            ESP_LOGI(TAG, "DERP handshake initiated for peer %s", peer->hostname);
-        }
+    // Always initiate handshake via DERP relay.
+    // Direct UDP handshakes fail when the ESP32 has no STUN-discovered public
+    // endpoint, because peers cannot route responses back through NAT.
+    // DISCO will switch to direct paths once a reachable endpoint is discovered.
+    ESP_LOGI(TAG, "Initiating handshake via DERP for peer %s", peer->hostname);
+    err = wireguardif_connect_derp((struct netif *)ml->wireguard.netif, peer_index);
+    if (err != ERR_OK) {
+        ESP_LOGW(TAG, "Failed to initiate DERP handshake: lwIP error %d", err);
     }
 
     return ESP_OK;
@@ -622,10 +602,15 @@ esp_err_t microlink_wireguard_inject_derp_packet(microlink_t *ml, uint32_t src_v
     IP_ADDR4(&derp_addr, 0, 0, 0, 0);  // Will be updated by WireGuard on success
 
     // Call wireguard-lwip's network receive function
-    // This processes the packet just like it came from UDP
+    // This processes the packet just like it came from UDP.
+    // CRITICAL: Must hold lwIP core lock because wireguardif_network_rx()
+    // calls ip_input() which modifies TCP state. Without this lock,
+    // concurrent TCP operations from other tasks would race.
     extern void wireguardif_network_rx(void *arg, struct udp_pcb *pcb,
                                         struct pbuf *p, const ip_addr_t *addr, u16_t port);
+    LOCK_TCPIP_CORE();
     wireguardif_network_rx(device, device->udp_pcb, p, &derp_addr, 0);
+    UNLOCK_TCPIP_CORE();
 
     // Note: wireguardif_network_rx frees the pbuf
 
@@ -671,7 +656,7 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
                 derp_packet_queue[i].len = len;
                 derp_packet_queue[i].pending = true;
                 queued_ml_ctx = ml;
-                ESP_LOGI(TAG, "DERP output queued (slot %d): %zu bytes, stack=%lu",
+                ESP_LOGD(TAG, "DERP output queued (slot %d): %zu bytes, stack=%lu",
                          i, len, (unsigned long)stack_remaining);
                 return ERR_OK;
             }
