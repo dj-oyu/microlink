@@ -91,7 +91,7 @@ static size_t stun_build_binding_request(uint8_t *buf, size_t buf_size) {
 static int stun_parse_binding_response(const uint8_t *buf, size_t len,
                                         uint32_t *mapped_ip, uint16_t *mapped_port) {
     if (len < STUN_HEADER_SIZE) {
-        ESP_LOGE(TAG, "Response too short: %zu bytes", len);
+        ESP_LOGE(TAG, "Response too short: %u bytes", (unsigned int)len);
         return -1;
     }
 
@@ -105,7 +105,7 @@ static int stun_parse_binding_response(const uint8_t *buf, size_t len,
     // Get message length
     uint16_t msg_len = ((uint16_t)buf[2] << 8) | buf[3];
     if (STUN_HEADER_SIZE + msg_len > len) {
-        ESP_LOGE(TAG, "Message truncated: claimed %u, have %zu", msg_len, len - STUN_HEADER_SIZE);
+        ESP_LOGE(TAG, "Message truncated: claimed %u, have %u", msg_len, (unsigned int)(len - STUN_HEADER_SIZE));
         return -1;
     }
 

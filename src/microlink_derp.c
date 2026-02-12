@@ -93,7 +93,7 @@ static int derp_tls_write_all(microlink_t *ml, const uint8_t *data, size_t len) 
     int retries = 0;
     const int max_retries = 20;  // 20 * 10ms = 200ms max (socket has 100ms timeout)
 
-    ESP_LOGI(TAG, "[TLS-WR] >> len=%zu stack=%lu", len, (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+    ESP_LOGI(TAG, "[TLS-WR] >> len=%u stack=%lu", (unsigned int)len, (unsigned long)uxTaskGetStackHighWaterMark(NULL));
 
     while (written < len) {
         // Check socket state before write
@@ -101,8 +101,8 @@ static int derp_tls_write_all(microlink_t *ml, const uint8_t *data, size_t len) 
         socklen_t sock_err_len = sizeof(sock_err);
         getsockopt(ml->derp.sockfd, SOL_SOCKET, SO_ERROR, &sock_err, &sock_err_len);
 
-        ESP_LOGI(TAG, "[TLS-WR] ssl_write(%zu) sock_err=%d fd=%d",
-                 len - written, sock_err, ml->derp.sockfd);
+        ESP_LOGI(TAG, "[TLS-WR] ssl_write(%u) sock_err=%d fd=%d",
+                 (unsigned int)(len - written), sock_err, ml->derp.sockfd);
 
         // Use select() to check if socket is writable BEFORE calling mbedtls
         // This prevents blocking inside mbedtls_ssl_write
@@ -112,8 +112,15 @@ static int derp_tls_write_all(microlink_t *ml, const uint8_t *data, size_t len) 
         FD_SET(ml->derp.sockfd, &write_fds);
         int sel_ret = select(ml->derp.sockfd + 1, NULL, &write_fds, NULL, &tv);
         if (sel_ret <= 0) {
-            ESP_LOGW(TAG, "[TLS-WR] Socket not writable (select=%d errno=%d), skip", sel_ret, errno);
-            return -1;  // Don't block, let WireGuard retry later
+            // Socket not writable - retry a few times before giving up
+            if (++retries <= 5) {
+                ESP_LOGW(TAG, "[TLS-WR] Socket not writable (select=%d errno=%d), retry %d/5",
+                         sel_ret, errno, retries);
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+            ESP_LOGW(TAG, "[TLS-WR] Socket not writable after 5 retries, giving up");
+            return -1;
         }
         ESP_LOGI(TAG, "[TLS-WR] socket writable, calling ssl_write...");
 
@@ -141,7 +148,7 @@ static int derp_tls_write_all(microlink_t *ml, const uint8_t *data, size_t len) 
         written += ret;
         retries = 0;  // Reset retry counter on successful write
     }
-    ESP_LOGI(TAG, "[TLS-WR] << OK %zu", written);
+    ESP_LOGI(TAG, "[TLS-WR] << OK %u", (unsigned int)written);
     return (int)written;
 }
 
@@ -729,8 +736,8 @@ static esp_err_t derp_connect_once(microlink_t *ml) {
         ESP_LOGE(TAG, "TCP connect failed: -0x%04x", -ret);
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "TCP connected in %llu ms (fd=%d)",
-             microlink_get_time_ms() - tcp_start, derp_server_fd.fd);
+    ESP_LOGI(TAG, "TCP connected in %lu ms (fd=%d)",
+             (unsigned long)(microlink_get_time_ms() - tcp_start), derp_server_fd.fd);
     ml->derp.sockfd = derp_server_fd.fd;
 
     // Set socket timeouts for TLS handshake
@@ -779,8 +786,8 @@ static esp_err_t derp_connect_once(microlink_t *ml) {
             goto fail;
         }
     }
-    ESP_LOGI(TAG, "TLS handshake complete in %llu ms, cipher: %s",
-             microlink_get_time_ms() - tls_start,
+    ESP_LOGI(TAG, "TLS handshake complete in %lu ms, cipher: %s",
+             (unsigned long)(microlink_get_time_ms() - tls_start),
              mbedtls_ssl_get_ciphersuite(&ml->derp.ssl));
 
     // Step 4: HTTP upgrade to DERP
@@ -887,7 +894,7 @@ esp_err_t microlink_derp_send_raw(microlink_t *ml, const uint8_t *dest_pubkey,
     }
 
     if (len > MICROLINK_NETWORK_BUFFER_SIZE) {
-        ESP_LOGE(TAG, "Packet too large: %zu", len);
+        ESP_LOGE(TAG, "Packet too large: %u", (unsigned int)len);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -903,8 +910,8 @@ esp_err_t microlink_derp_send_raw(microlink_t *ml, const uint8_t *dest_pubkey,
     memcpy(frame, dest_pubkey, 32);
     memcpy(frame + 32, data, len);
 
-    ESP_LOGI(TAG, "DERP SEND_PACKET: %zu bytes to peer %02x%02x%02x%02x%02x%02x%02x%02x...",
-             len, dest_pubkey[0], dest_pubkey[1], dest_pubkey[2], dest_pubkey[3],
+    ESP_LOGI(TAG, "DERP SEND_PACKET: %u bytes to peer %02x%02x%02x%02x%02x%02x%02x%02x...",
+             (unsigned int)len, dest_pubkey[0], dest_pubkey[1], dest_pubkey[2], dest_pubkey[3],
              dest_pubkey[4], dest_pubkey[5], dest_pubkey[6], dest_pubkey[7]);
 
     // Check if this is a DISCO packet
@@ -1027,7 +1034,7 @@ esp_err_t microlink_derp_receive(microlink_t *ml) {
             // Check if this is a DISCO packet (starts with "TS💬" magic)
             // DISCO packets must be routed to the DISCO handler, NOT WireGuard
             if (microlink_disco_is_disco_packet(payload, payload_len)) {
-                ESP_LOGI(TAG, "Received DISCO packet via DERP (%zu bytes)", payload_len);
+                ESP_LOGI(TAG, "Received DISCO packet via DERP (%u bytes)", (unsigned int)payload_len);
                 microlink_disco_handle_derp_packet(ml, src_key, payload, payload_len);
                 break;
             }
@@ -1040,8 +1047,8 @@ esp_err_t microlink_derp_receive(microlink_t *ml) {
             else if (wg_type == 3) wg_type_str = "COOKIE";
             else if (wg_type == 4) wg_type_str = "TRANSPORT";
 
-            ESP_LOGI(TAG, "Received WG packet via DERP: %zu bytes, type=%s from %02x%02x%02x%02x...",
-                     payload_len, wg_type_str, src_key[0], src_key[1], src_key[2], src_key[3]);
+            ESP_LOGI(TAG, "Received WG packet via DERP: %u bytes, type=%s from %02x%02x%02x%02x...",
+                     (unsigned int)payload_len, wg_type_str, src_key[0], src_key[1], src_key[2], src_key[3]);
 
             // Find peer by public key to get VPN IP (optional for handshakes)
             uint32_t src_vpn_ip = 0;

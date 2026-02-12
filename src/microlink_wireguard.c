@@ -45,7 +45,7 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
  * We queue these packets and send them from the main MicroLink task.
  * ========================================================================== */
 
-#define DERP_QUEUE_SIZE 8
+#define DERP_QUEUE_SIZE 32  // Increased from 8 to handle multiple peer handshakes
 #define DERP_PACKET_MAX_SIZE 256
 
 typedef struct {
@@ -402,17 +402,30 @@ esp_err_t microlink_wireguard_add_peer(microlink_t *ml, const microlink_peer_t *
     wg_peer.public_key = peer_pubkey_b64;
     wg_peer.preshared_key = NULL;  // No PSK for now
 
-    // Set allowed IP (peer's VPN IP)
-    microlink_ip_to_lwip(peer->vpn_ip, &wg_peer.allowed_ip);
+    // Set allowed IP - use OUR VPN IP (destination of incoming packets)
+    // The wireguard-lwip implementation checks if the DESTINATION IP of incoming
+    // decrypted packets is in the allowed_source_ips list. So we need to allow
+    // packets destined for our own VPN IP to be accepted.
+    //
+    // Note: This is non-standard WireGuard behavior - normally allowed_ips
+    // would check the SOURCE IP. But for Tailscale, all peers in the tailnet
+    // can communicate with each other, so we allow our own IP.
+    microlink_ip_to_lwip(ml->vpn_ip, &wg_peer.allowed_ip);
     IP4_ADDR(&wg_peer.allowed_mask.u_addr.ip4, 255, 255, 255, 255);  // /32 single host
     wg_peer.allowed_mask.type = IPADDR_TYPE_V4;
 
-    // Set endpoint if available
-    if (peer->endpoint_count > 0 && !peer->endpoints[0].is_derp) {
-        microlink_ip_to_lwip(peer->endpoints[0].ip, &wg_peer.endpoint_ip);
+    ESP_LOGI(TAG, "Allowing packets destined for our VPN IP: %u.%u.%u.%u",
+             (ml->vpn_ip >> 24) & 0xFF,
+             (ml->vpn_ip >> 16) & 0xFF,
+             (ml->vpn_ip >> 8) & 0xFF,
+             ml->vpn_ip & 0xFF);
+
+    // Set endpoint if available (IPv4 only for now - TODO: add IPv6 WireGuard support)
+    if (peer->endpoint_count > 0 && !peer->endpoints[0].is_derp && !peer->endpoints[0].is_ipv6) {
+        microlink_ip_to_lwip(peer->endpoints[0].addr.ip4, &wg_peer.endpoint_ip);
         wg_peer.endport_port = peer->endpoints[0].port;
     } else {
-        // No direct endpoint, will rely on DERP
+        // No direct endpoint or IPv6-only, will rely on DERP
         memset(&wg_peer.endpoint_ip, 0, sizeof(ip_addr_t));
         wg_peer.endport_port = 0;
     }
@@ -437,30 +450,35 @@ esp_err_t microlink_wireguard_add_peer(microlink_t *ml, const microlink_peer_t *
 
     ESP_LOGI(TAG, "Peer added successfully (index %d)", peer_index);
 
-    // Initiate handshake
-    if (peer->endpoint_count > 0 && !peer->endpoints[0].is_derp) {
-        // Peer has direct endpoint - use standard connect
-        err = wireguardif_connect((struct netif *)ml->wireguard.netif, peer_index);
-        if (err != ERR_OK) {
-            ESP_LOGW(TAG, "Failed to initiate handshake: lwIP error %d", err);
-        } else {
-            ESP_LOGI(TAG, "Handshake initiated to %u.%u.%u.%u:%u",
-                     (peer->endpoints[0].ip >> 24) & 0xFF,
-                     (peer->endpoints[0].ip >> 16) & 0xFF,
-                     (peer->endpoints[0].ip >> 8) & 0xFF,
-                     peer->endpoints[0].ip & 0xFF,
-                     peer->endpoints[0].port);
+    // Initiate handshake via DERP first (always reliable, bypasses NAT issues)
+    // Direct UDP path will be tried later as an optimization via DISCO
+    //
+    // Why DERP-first:
+    // - Direct UDP handshakes fail ~50-70% due to asymmetric NAT
+    // - DERP uses TCP to Tailscale relay servers, always works
+    // - Once handshake completes via DERP, traffic flows immediately
+    // - DISCO will upgrade to direct path in background if possible
+    ESP_LOGI(TAG, "Initiating handshake via DERP (reliable, bypasses NAT)");
+    err = wireguardif_connect_derp((struct netif *)ml->wireguard.netif, peer_index);
+    if (err != ERR_OK) {
+        ESP_LOGW(TAG, "Failed to initiate DERP handshake: lwIP error %d", err);
+
+        // Fallback: try direct if DERP fails and we have an endpoint
+        if (peer->endpoint_count > 0 && !peer->endpoints[0].is_derp) {
+            ESP_LOGI(TAG, "DERP failed, trying direct handshake as fallback");
+            err = wireguardif_connect((struct netif *)ml->wireguard.netif, peer_index);
+            if (err == ERR_OK) {
+                uint32_t ip = ntohl(peer->endpoints[0].addr.ip4);
+                ESP_LOGI(TAG, "Direct handshake initiated to %lu.%lu.%lu.%lu:%u",
+                         (unsigned long)((ip >> 24) & 0xFF),
+                         (unsigned long)((ip >> 16) & 0xFF),
+                         (unsigned long)((ip >> 8) & 0xFF),
+                         (unsigned long)(ip & 0xFF),
+                         peer->endpoints[0].port);
+            }
         }
     } else {
-        // DERP-only peer - initiate handshake via DERP
-        // The DERP output callback will route handshake packets through the relay
-        ESP_LOGI(TAG, "Peer has no direct endpoint, initiating handshake via DERP");
-        err = wireguardif_connect_derp((struct netif *)ml->wireguard.netif, peer_index);
-        if (err != ERR_OK) {
-            ESP_LOGW(TAG, "Failed to initiate DERP handshake: lwIP error %d", err);
-        } else {
-            ESP_LOGI(TAG, "DERP handshake initiated for peer %s", peer->hostname);
-        }
+        ESP_LOGI(TAG, "DERP handshake initiated for peer %s", peer->hostname);
     }
 
     return ESP_OK;
@@ -517,6 +535,63 @@ esp_err_t microlink_wireguard_update_endpoint(microlink_t *ml, uint32_t vpn_ip,
 
     ESP_LOGI(TAG, "Handshake initiated with updated endpoint");
     return ESP_OK;
+}
+
+/**
+ * @brief Trigger WireGuard handshake to a peer
+ *
+ * Used when attempting to send data to a peer that doesn't have an active session.
+ * Initiates handshake via DERP (reliable) first, with direct UDP as fallback.
+ *
+ * @param ml MicroLink handle
+ * @param vpn_ip Peer VPN IP (host byte order)
+ * @return ESP_OK on success
+ */
+esp_err_t microlink_wireguard_trigger_handshake(microlink_t *ml, uint32_t vpn_ip) {
+    if (!ml || !ml->wireguard.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Find peer index
+    uint8_t last_byte = vpn_ip & 0xFF;
+    if (last_byte >= MICROLINK_PEER_MAP_SIZE) {
+        ESP_LOGW(TAG, "Invalid VPN IP for handshake: %lu", (unsigned long)vpn_ip);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint8_t peer_index = ml->peer_map[last_byte];
+    if (peer_index == 0xFF) {
+        ESP_LOGW(TAG, "Peer not found for VPN IP: %lu.%lu.%lu.%lu",
+                 (unsigned long)((vpn_ip >> 24) & 0xFF),
+                 (unsigned long)((vpn_ip >> 16) & 0xFF),
+                 (unsigned long)((vpn_ip >> 8) & 0xFF),
+                 (unsigned long)(vpn_ip & 0xFF));
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_LOGI(TAG, "Triggering WireGuard handshake to peer %lu.%lu.%lu.%lu (index=%d)",
+             (unsigned long)((vpn_ip >> 24) & 0xFF),
+             (unsigned long)((vpn_ip >> 16) & 0xFF),
+             (unsigned long)((vpn_ip >> 8) & 0xFF),
+             (unsigned long)(vpn_ip & 0xFF),
+             peer_index);
+
+    // Try DERP first (reliable, bypasses NAT)
+    err_t err = wireguardif_connect_derp((struct netif *)ml->wireguard.netif, peer_index);
+    if (err == ERR_OK) {
+        ESP_LOGI(TAG, "DERP handshake initiated");
+        return ESP_OK;
+    }
+
+    // Fallback to direct
+    err = wireguardif_connect((struct netif *)ml->wireguard.netif, peer_index);
+    if (err == ERR_OK) {
+        ESP_LOGI(TAG, "Direct handshake initiated");
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "Failed to trigger handshake: lwIP error %d", err);
+    return ESP_FAIL;
 }
 
 /* ============================================================================
@@ -585,12 +660,18 @@ esp_err_t microlink_wireguard_receive(microlink_t *ml) {
 }
 
 /**
- * @brief Inject a DERP-relayed WireGuard packet for processing
+ * @brief Inject a WireGuard packet for processing
  *
- * When a WireGuard packet arrives via DERP relay, we need to pass it
- * to the WireGuard stack for decryption and routing.
+ * When a WireGuard packet arrives via DERP relay OR direct UDP (on DISCO port),
+ * we need to pass it to the WireGuard stack for decryption and routing.
+ *
+ * @param ml MicroLink handle
+ * @param src_ip Source IP in network byte order (0 for DERP relay)
+ * @param data Raw WireGuard packet data
+ * @param len Packet length
+ * @return ESP_OK on success
  */
-esp_err_t microlink_wireguard_inject_derp_packet(microlink_t *ml, uint32_t src_vpn_ip,
+esp_err_t microlink_wireguard_inject_derp_packet(microlink_t *ml, uint32_t src_ip,
                                                   const uint8_t *data, size_t len) {
     if (!ml->wireguard.initialized || !ml->wireguard.netif) {
         return ESP_ERR_INVALID_STATE;
@@ -610,26 +691,39 @@ esp_err_t microlink_wireguard_inject_derp_packet(microlink_t *ml, uint32_t src_v
     // Create a pbuf to hold the packet
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
     if (!p) {
-        ESP_LOGW(TAG, "Failed to allocate pbuf for DERP packet");
+        ESP_LOGW(TAG, "Failed to allocate pbuf for WG packet");
         return ESP_ERR_NO_MEM;
     }
 
     memcpy(p->payload, data, len);
 
-    // For DERP-relayed packets, we use INADDR_ANY as the source
-    // since the actual peer endpoint is unknown (routed via DERP)
-    ip_addr_t derp_addr;
-    IP_ADDR4(&derp_addr, 0, 0, 0, 0);  // Will be updated by WireGuard on success
+    // Use actual source IP if provided, otherwise 0.0.0.0 for DERP
+    // src_ip is in network byte order, need to construct lwIP ip_addr_t
+    ip_addr_t src_addr;
+    if (src_ip != 0) {
+        // Direct UDP packet - use actual source IP
+        // src_ip is already in network byte order from htonl() in disco task
+        ip4_addr_set_u32(ip_2_ip4(&src_addr), src_ip);
+        src_addr.type = IPADDR_TYPE_V4;
+        ESP_LOGD(TAG, "Injecting direct WG packet from %d.%d.%d.%d",
+                 (int)((src_ip) & 0xFF),
+                 (int)((src_ip >> 8) & 0xFF),
+                 (int)((src_ip >> 16) & 0xFF),
+                 (int)((src_ip >> 24) & 0xFF));
+    } else {
+        // DERP relay - use 0.0.0.0
+        IP_ADDR4(&src_addr, 0, 0, 0, 0);
+        ESP_LOGD(TAG, "Injecting DERP WG packet");
+    }
 
     // Call wireguard-lwip's network receive function
     // This processes the packet just like it came from UDP
     extern void wireguardif_network_rx(void *arg, struct udp_pcb *pcb,
                                         struct pbuf *p, const ip_addr_t *addr, u16_t port);
-    wireguardif_network_rx(device, device->udp_pcb, p, &derp_addr, 0);
+    wireguardif_network_rx(device, device->udp_pcb, p, &src_addr, 41641);
 
     // Note: wireguardif_network_rx frees the pbuf
 
-    ESP_LOGD(TAG, "Injected %u byte DERP packet for WireGuard processing", (unsigned int)len);
     return ESP_OK;
 }
 
@@ -663,6 +757,26 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
             return ERR_MEM;
         }
 
+        // RATE LIMITING: Prevent handshake spam that congests DERP socket
+        // WireGuard retries handshakes every 5 seconds, but we might get called
+        // multiple times per retry. Limit to 1 packet per peer per 500ms.
+        static uint64_t last_queue_time[DERP_QUEUE_SIZE] = {0};
+        static uint8_t last_peer_key[DERP_QUEUE_SIZE][4] = {{0}};  // First 4 bytes of peer key
+
+        uint64_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+        // Check if we recently queued a packet for this peer
+        for (int i = 0; i < DERP_QUEUE_SIZE; i++) {
+            if (memcmp(last_peer_key[i], peer_public_key, 4) == 0) {
+                if (now_ms - last_queue_time[i] < 500) {
+                    // Silently drop - we just sent one
+                    ESP_LOGD(TAG, "DERP queue rate-limited for peer %02x%02x...",
+                             peer_public_key[0], peer_public_key[1]);
+                    return ERR_OK;
+                }
+            }
+        }
+
         // Find a free slot in the queue
         for (int i = 0; i < DERP_QUEUE_SIZE; i++) {
             if (!derp_packet_queue[i].pending) {
@@ -671,14 +785,18 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
                 derp_packet_queue[i].len = len;
                 derp_packet_queue[i].pending = true;
                 queued_ml_ctx = ml;
-                ESP_LOGI(TAG, "DERP output queued (slot %d): %u bytes, stack=%lu",
-                         i, (unsigned int)len, (unsigned long)stack_remaining);
+
+                // Record for rate limiting
+                memcpy(last_peer_key[i], peer_public_key, 4);
+                last_queue_time[i] = now_ms;
+
+                ESP_LOGD(TAG, "DERP output queued (slot %d): %u bytes",
+                         i, (unsigned int)len);
                 return ERR_OK;
             }
         }
 
-        ESP_LOGW(TAG, "DERP queue full, dropping packet (stack=%lu)",
-                 (unsigned long)stack_remaining);
+        ESP_LOGW(TAG, "DERP queue full, dropping packet");
         return ERR_OK;  // Don't return error, WireGuard will retry
     }
 

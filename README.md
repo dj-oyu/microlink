@@ -12,16 +12,19 @@ MicroLink is a complete, production-ready implementation of the Tailscale protoc
   - DISCO path discovery (PING/PONG/CALL_ME_MAYBE)
   - DERP relay for NAT traversal
   - STUN for public IP discovery
+  - **Bidirectional UDP data transfer** (NEW in v1.2.0)
 
 - **Production Ready**
   - Memory optimized (~100KB SRAM)
   - Tested with ESP32-S3
   - Works with `tailscale ping`
+  - **Bidirectional VPN data transfer** (ESP32 ↔ PC)
 
 - **Easy Integration**
   - Simple C API
   - ESP-IDF component format
   - Kconfig configuration
+  - **Callback-based UDP reception** for low-latency handling
 
 ## Requirements
 
@@ -204,7 +207,31 @@ bool microlink_is_connected(const microlink_t *ml);
 microlink_state_t microlink_get_state(const microlink_t *ml);
 ```
 
-### Data Transfer
+### UDP Data Transfer (NEW in v1.2.0)
+
+```c
+// Create UDP socket (port 0 = ephemeral, or specify port to listen)
+microlink_udp_socket_t *sock = microlink_udp_create(ml, port);
+
+// Send UDP data to peer
+esp_err_t err = microlink_udp_send(sock, dest_vpn_ip, dest_port, data, len);
+
+// Receive UDP data (with timeout in ms, 0 = non-blocking)
+esp_err_t err = microlink_udp_recv(sock, &src_ip, &src_port, buffer, &len, timeout_ms);
+
+// Register callback for incoming packets (low-latency option)
+void my_callback(microlink_udp_socket_t *sock, uint32_t src_ip, uint16_t src_port,
+                 const uint8_t *data, size_t len, void *user_data);
+microlink_udp_set_rx_callback(sock, my_callback, user_data);
+
+// Close socket
+microlink_udp_close(sock);
+
+// Parse IP string to uint32_t
+uint32_t ip = microlink_parse_ip("100.64.0.1");
+```
+
+### Raw Data Transfer (Legacy)
 
 ```c
 // Send data to peer
@@ -328,6 +355,11 @@ See the `examples/` directory:
 - `ping_pong/` - Respond to `tailscale ping` with latency monitoring (ESP32-S3)
 - `ping_pong_esp32/` - Memory-optimized version for ESP32 without PSRAM
 - `sensor_node/` - Practical IoT example: send sensor data over VPN
+- **`udp_netcat_example/`** - Bidirectional UDP communication (NEW in v1.2.0)
+  - Send/receive UDP over Tailscale VPN
+  - Equivalent to Linux `netcat -u`
+  - Echo mode for latency testing
+  - See [examples/udp_netcat_example/README.md](examples/udp_netcat_example/README.md)
 
 ## Testing
 

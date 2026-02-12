@@ -140,4 +140,28 @@ void wireguardif_set_derp_output(struct netif *netif, wireguard_derp_output_fn f
 // The handshake will be routed through the DERP callback if set
 err_t wireguardif_connect_derp(struct netif *netif, u8_t peer_index);
 
+// Inject a received packet into the WireGuard interface (for magicsock demux)
+// This allows an external unified socket to receive all packets and route
+// WireGuard packets to this interface. The packet data is copied internally.
+// src_ip: source IP in network byte order (0 for DERP)
+// src_port: source port in host byte order
+// data: raw packet data
+// len: packet length
+err_t wireguardif_inject_packet(struct netif *netif, uint32_t src_ip, uint16_t src_port,
+                                 const uint8_t *data, size_t len);
+
+// Check if packet looks like a WireGuard packet (type 1-4)
+// Returns true if this appears to be a WireGuard packet
+bool wireguardif_is_wireguard_packet(const uint8_t *data, size_t len);
+
+// Disable WireGuard's internal UDP socket binding
+// Call before wireguardif_init to prevent WireGuard from binding its own socket.
+// The caller is then responsible for receiving packets and calling wireguardif_inject_packet.
+void wireguardif_disable_socket_bind(void);
+
+// Set the UDP output callback for magicsock mode
+// When socket binding is disabled, this callback is used to send packets
+// via an external unified socket instead of the internal lwIP UDP PCB.
+void wireguardif_set_udp_output(struct netif *netif, wireguard_udp_output_fn fn, void *ctx);
+
 #endif /* _WIREGUARDIF_H_ */

@@ -60,7 +60,9 @@ extern "C" {
 #define MICROLINK_DERP_PORT 443
 
 // STUN servers (fallback list)
-#define MICROLINK_STUN_SERVER "stun.tailscale.com"
+// NOTE: Tailscale doesn't have a dedicated "stun.tailscale.com" - STUN runs on DERP servers!
+// derp1.tailscale.com (NYC) serves STUN on port 3478
+#define MICROLINK_STUN_SERVER "derp1.tailscale.com"
 #define MICROLINK_STUN_SERVER_FALLBACK "stun.l.google.com"
 #define MICROLINK_STUN_PORT 3478
 #define MICROLINK_STUN_PORT_GOOGLE 19302
@@ -83,13 +85,23 @@ typedef enum {
 } microlink_state_t;
 
 /**
- * @brief Network endpoint (IP:port)
+ * @brief Network endpoint (IP:port) - supports both IPv4 and IPv6
+ *
+ * IPv6 support enables direct connectivity without NAT traversal, which
+ * dramatically simplifies connection establishment and reduces latency.
  */
 typedef struct {
-    uint32_t ip;                        ///< IPv4 address (network byte order)
+    union {
+        uint32_t ip4;                   ///< IPv4 address (network byte order)
+        uint8_t ip6[16];                ///< IPv6 address (network byte order)
+    } addr;
     uint16_t port;                      ///< Port (host byte order)
-    bool is_derp;                       ///< True if DERP relay endpoint
+    uint8_t is_ipv6 : 1;                ///< True if IPv6 address
+    uint8_t is_derp : 1;                ///< True if DERP relay endpoint
 } microlink_endpoint_t;
+
+// Backwards compatibility macro for IPv4-only code
+#define MICROLINK_EP_IP4(ep) ((ep)->addr.ip4)
 
 /**
  * @brief Peer device information
@@ -411,6 +423,46 @@ esp_err_t microlink_udp_recv(microlink_udp_socket_t *sock, uint32_t *src_ip,
  * @return Local port number, 0 on error
  */
 uint16_t microlink_udp_get_local_port(const microlink_udp_socket_t *sock);
+
+/**
+ * @brief UDP receive callback type
+ *
+ * Called when a UDP packet is received on a socket with a registered callback.
+ *
+ * @param sock UDP socket handle
+ * @param src_ip Source IP (host byte order)
+ * @param src_port Source port
+ * @param data Received data
+ * @param len Data length
+ * @param user_arg User argument passed to microlink_udp_set_rx_callback
+ */
+typedef void (*microlink_udp_rx_callback_t)(microlink_udp_socket_t *sock,
+                                             uint32_t src_ip, uint16_t src_port,
+                                             const uint8_t *data, size_t len,
+                                             void *user_arg);
+
+/**
+ * @brief Set receive callback for UDP socket
+ *
+ * When set, the callback is invoked for each received packet instead of
+ * queueing for microlink_udp_recv(). This provides lower latency.
+ *
+ * @param sock UDP socket handle
+ * @param callback Callback function (NULL to disable)
+ * @param user_arg User argument passed to callback
+ * @return ESP_OK on success
+ */
+esp_err_t microlink_udp_set_rx_callback(microlink_udp_socket_t *sock,
+                                         microlink_udp_rx_callback_t callback,
+                                         void *user_arg);
+
+/**
+ * @brief Get the number of peers
+ *
+ * @param ml MicroLink handle
+ * @return Number of peers in the peer list
+ */
+int microlink_get_peer_count(const microlink_t *ml);
 
 /**
  * @brief Parse IP string to host byte order uint32

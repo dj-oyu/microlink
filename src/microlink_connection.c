@@ -131,18 +131,42 @@ void microlink_state_machine(microlink_t *ml) {
         }
 
         case MICROLINK_STATE_CONFIGURING_WG: {
-            // Add peers to WireGuard
+            // Connect to DERP FIRST - we need it for reliable handshakes
+            // DERP-first strategy: all handshakes go through DERP relay initially,
+            // then upgrade to direct UDP via DISCO if possible
+            if (ml->config.enable_derp && !ml->derp.connected) {
+                static bool derp_connect_started = false;
+                if (!derp_connect_started) {
+                    ESP_LOGI(TAG, "Connecting to DERP relay FIRST (for reliable handshakes)...");
+                    microlink_derp_connect(ml);
+                    derp_connect_started = true;
+                }
+                // Wait for DERP to connect before adding peers
+                if (!ml->derp.connected) {
+                    // Give DERP time to connect, but don't wait forever
+                    if (time_in_state > 10000) {
+                        ESP_LOGW(TAG, "DERP connection timeout, proceeding without DERP");
+                        derp_connect_started = false;  // Reset for next attempt
+                    } else {
+                        break;  // Wait for DERP
+                    }
+                }
+                derp_connect_started = false;  // Reset for reconnections
+                ESP_LOGI(TAG, "DERP connected, waiting for socket to stabilize...");
+                vTaskDelay(pdMS_TO_TICKS(500));  // Give TLS socket time to stabilize
+                ESP_LOGI(TAG, "Now adding peers...");
+            }
+
+            // Add peers to WireGuard (handshakes will use DERP)
             for (uint8_t i = 0; i < ml->peer_count; i++) {
                 esp_err_t ret = microlink_wireguard_add_peer(ml, &ml->peers[i]);
                 if (ret != ESP_OK) {
                     ESP_LOGW(TAG, "Failed to add peer %d", i);
                 }
-            }
-
-            // Connect to DERP AFTER we have VPN IP from MapRequest
-            if (ml->config.enable_derp && !ml->derp.connected) {
-                ESP_LOGI(TAG, "Connecting to DERP relay...");
-                microlink_derp_connect(ml);
+                // Process queued DERP packets after each peer to prevent queue overflow
+                // Handshakes queue packets immediately, need to drain the queue
+                microlink_wireguard_process_derp_queue();
+                vTaskDelay(pdMS_TO_TICKS(50));  // Brief delay for DERP send to complete
             }
 
             // STUN already done in FETCHING_PEERS state
@@ -153,6 +177,9 @@ void microlink_state_machine(microlink_t *ml) {
         }
 
         case MICROLINK_STATE_CONNECTED: {
+            // Process any pending DERP queue items during transition
+            microlink_wireguard_process_derp_queue();
+
             // The poll task is now started in microlink_coordination_fetch_peers()
             // immediately after the long-poll is established, to avoid nonce desync.
             // Here we just transition to MONITORING after a brief delay.
