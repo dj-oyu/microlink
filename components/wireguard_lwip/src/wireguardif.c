@@ -712,6 +712,25 @@ err_t wireguardif_connect(struct netif *netif, u8_t peer_index) {
 	return result;
 }
 
+err_t wireguardif_connect_direct(struct netif *netif, u8_t peer_index) {
+	struct wireguard_peer *peer;
+	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
+	if (result == ERR_OK) {
+		if (!ip_addr_isany(&peer->connect_ip) && (peer->connect_port > 0)) {
+			peer->active = true;
+			peer->ip = peer->connect_ip;
+			peer->port = peer->connect_port;
+			peer->send_handshake = true;
+			peer->last_initiation_tx = 0;
+			wireguard_start_handshake(netif, peer);
+			result = ERR_OK;
+		} else {
+			result = ERR_ARG;
+		}
+	}
+	return result;
+}
+
 err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index) {
 	struct wireguard_peer *peer;
 	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);

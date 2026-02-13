@@ -906,6 +906,16 @@ esp_err_t microlink_disco_update_paths(microlink_t *ml) {
             if (!peer->using_derp) {
                 ESP_LOGI(TAG, "Peer %d: direct path lost, reverting to DERP", i);
                 peer->using_derp = true;
+                // Reset WG endpoint to DERP relay and re-handshake
+                if (ml->wireguard.netif) {
+                    uint8_t last_byte = peer->vpn_ip & 0xFF;
+                    if (last_byte < MICROLINK_PEER_MAP_SIZE) {
+                        uint8_t wg_idx = ml->peer_map[last_byte];
+                        if (wg_idx != 0xFF) {
+                            wireguardif_connect_derp((struct netif *)ml->wireguard.netif, wg_idx);
+                        }
+                    }
+                }
             }
         }
     }

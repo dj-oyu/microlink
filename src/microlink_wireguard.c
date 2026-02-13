@@ -578,14 +578,14 @@ esp_err_t microlink_wireguard_update_endpoint(microlink_t *ml, uint32_t vpn_ip,
              endpoint_ip & 0xFF,
              endpoint_port);
 
-    // Initiate handshake with the NEW endpoint
-    err = wireguardif_connect(netif, peer_index);
+    // Initiate handshake with the NEW direct endpoint
+    err = wireguardif_connect_direct(netif, peer_index);
     if (err != ERR_OK) {
         ESP_LOGW(TAG, "Failed to initiate handshake after endpoint update: %d", err);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Handshake initiated with updated endpoint");
+    ESP_LOGI(TAG, "Handshake initiated with direct endpoint");
     return ESP_OK;
 }
 
