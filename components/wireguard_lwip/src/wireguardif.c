@@ -718,11 +718,19 @@ err_t wireguardif_connect_direct(struct netif *netif, u8_t peer_index) {
 	if (result == ERR_OK) {
 		if (!ip_addr_isany(&peer->connect_ip) && (peer->connect_port > 0)) {
 			peer->active = true;
-			peer->ip = peer->connect_ip;
-			peer->port = peer->connect_port;
 			peer->send_handshake = true;
 			peer->last_initiation_tx = 0;
+			// Temporarily set direct endpoint for handshake initiation only.
+			// Restore old endpoint after sending so data continues via current
+			// path (DERP) until the handshake response arrives and
+			// update_peer_addr() switches the endpoint naturally.
+			ip_addr_t saved_ip = peer->ip;
+			u16_t saved_port = peer->port;
+			peer->ip = peer->connect_ip;
+			peer->port = peer->connect_port;
 			wireguard_start_handshake(netif, peer);
+			peer->ip = saved_ip;
+			peer->port = saved_port;
 			result = ERR_OK;
 		} else {
 			result = ERR_ARG;

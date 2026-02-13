@@ -564,13 +564,10 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
                                  (unsigned long)src_ip & 0xFF, src_port);
                         peer->latency_ms = rtt;
                         peer->best_endpoint_idx = ep;
-                        if (ep < peer->endpoint_count && !peer->endpoints[ep].is_derp) {
-                            esp_err_t ep_ret = microlink_wireguard_update_endpoint(
-                                ml, peer->vpn_ip, src_ip, src_port);
-                            if (ep_ret != ESP_OK) {
-                                ESP_LOGW(TAG, "update_endpoint failed: %d", ep_ret);
-                            }
-                        }
+                        // Ensure WG connect_ip/connect_port are in sync
+                        // (update_peer_addr() already handles ip/port on rx)
+                        microlink_wireguard_update_endpoint(
+                            ml, peer->vpn_ip, src_ip, src_port);
                         peer->using_derp = false;
                     }
 
