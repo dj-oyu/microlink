@@ -97,11 +97,13 @@ void microlink_state_machine(microlink_t *ml) {
             // Use time_in_state to ensure STUN runs on first entry (time_in_state ~0)
             // and wait 500ms for STUN to complete before sending MapRequest
             if (ml->config.enable_stun && time_in_state < 100) {
-                ESP_LOGI(TAG, "Running STUN probe BEFORE MapRequest to discover endpoint...");
-                microlink_stun_probe(ml);
-                // Run dual-STUN NAT type detection (reuses DISCO PCB)
+                // Dual-STUN NAT type detection: probes two servers, discovers
+                // public IP/port AND detects NAT type (cone vs symmetric).
+                // This replaces the separate stun_probe() — detect already
+                // does 2 probes and sets public_ip/public_port from the first.
+                ESP_LOGI(TAG, "Running dual-STUN NAT detection BEFORE MapRequest...");
                 microlink_stun_detect_nat_type(ml);
-                break;  // Return and wait for STUN to complete
+                break;
             }
 
             // Wait a bit for STUN response before sending MapRequest
@@ -130,6 +132,11 @@ void microlink_state_machine(microlink_t *ml) {
             if (ml->config.enable_derp && !ml->derp.connected) {
                 ESP_LOGI(TAG, "Connecting to DERP relay...");
                 microlink_derp_connect(ml);
+            }
+
+            // Mark ALL peers as using DERP initially — DISCO will upgrade to direct
+            for (uint8_t i = 0; i < ml->peer_count; i++) {
+                ml->peers[i].using_derp = true;
             }
 
             // Add peers to WireGuard (handshake via DERP if no direct endpoint)

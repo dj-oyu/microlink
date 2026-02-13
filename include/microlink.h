@@ -52,22 +52,24 @@ extern "C" {
 
 // DERP relay servers
 // Tailscale DERP regions: 1=NYC, 2=SF, 9=DFW(Dallas), 10=SEA(Seattle), etc.
-// Use derp9d.tailscale.com for Dallas region (region ID 9)
+// DERPMap nodes change over time — check https://login.tailscale.com/derpmap/default
 // IMPORTANT: DERP hostname number != region ID (derp10 is Seattle/region 10, derp9d is Dallas/region 9)
-#define MICROLINK_DERP_SERVER "derp7.tailscale.com"   // Tokyo (nrt) - Region ID 7
+#define MICROLINK_DERP_SERVER "derp7g.tailscale.com"  // Tokyo (nrt) - Region ID 7
 #define MICROLINK_DERP_REGION 7  // Must match the server! Region 7 = Tokyo
 #define MICROLINK_DERP_SERVER_FALLBACK "derp11.tailscale.com"  // Singapore fallback (region 11)
 #define MICROLINK_DERP_PORT 443
 
-// STUN servers
-// Tailscale DERP servers also serve STUN on port 3478 (stun.tailscale.com does NOT exist)
-#define MICROLINK_STUN_SERVER MICROLINK_DERP_SERVER  // derp7.tailscale.com (Tokyo)
+// STUN servers for NAT type detection (two distinct servers required)
+// Probe 1 (primary): Google STUN — reliable, fast
+// Probe 2 (secondary): Cloudflare STUN — different IP for NAT comparison
+// NOTE: Tailscale DERP servers (derp7.tailscale.com:3478) no longer respond to STUN
+#define MICROLINK_STUN_SERVER "stun.cloudflare.com"
 #define MICROLINK_STUN_SERVER_FALLBACK "stun.l.google.com"
 #define MICROLINK_STUN_PORT 3478
 #define MICROLINK_STUN_PORT_GOOGLE 19302
 
 // Hardcoded STUN server IPs (DNS fallback)
-#define MICROLINK_STUN_SERVER_IP       "167.179.89.145"  // derp7.tailscale.com (Tokyo)
+#define MICROLINK_STUN_SERVER_IP       "162.159.207.0"    // stun.cloudflare.com
 #define MICROLINK_STUN_SERVER_FALLBACK_IP "74.125.250.129"  // stun.l.google.com
 
 /* ============================================================================

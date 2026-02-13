@@ -556,12 +556,20 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
                             }
                         }
                     } else {
-                        ESP_LOGI(TAG, "PONG peer %d direct: %lums", peer_idx, (unsigned long)rtt);
+                        ESP_LOGI(TAG, "PONG peer %d direct: %lums src=%lu.%lu.%lu.%lu:%u",
+                                 peer_idx, (unsigned long)rtt,
+                                 (unsigned long)(src_ip >> 24) & 0xFF,
+                                 (unsigned long)(src_ip >> 16) & 0xFF,
+                                 (unsigned long)(src_ip >> 8) & 0xFF,
+                                 (unsigned long)src_ip & 0xFF, src_port);
                         peer->latency_ms = rtt;
                         peer->best_endpoint_idx = ep;
                         if (ep < peer->endpoint_count && !peer->endpoints[ep].is_derp) {
-                            microlink_wireguard_update_endpoint(ml, peer->vpn_ip,
-                                                                src_ip, src_port);
+                            esp_err_t ep_ret = microlink_wireguard_update_endpoint(
+                                ml, peer->vpn_ip, src_ip, src_port);
+                            if (ep_ret != ESP_OK) {
+                                ESP_LOGW(TAG, "update_endpoint failed: %d", ep_ret);
+                            }
                         }
                         peer->using_derp = false;
                     }
@@ -572,14 +580,15 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
             }
 
             if (!found) {
-                ESP_LOGD(TAG, "PONG from peer %d - no matching probe", peer_idx);
-
                 if (!via_derp) {
+                    // Check full txid match (CMM/spray probes)
+                    bool full_match = false;
                     for (int ep = 0; ep < MICROLINK_MAX_ENDPOINTS; ep++) {
                         disco_probe_state_t *probe = &pending_probes[peer_idx][ep];
                         if (probe->pending && memcmp(probe->txid, txid, DISCO_TXID_LEN) == 0) {
                             uint32_t rtt = (uint32_t)(now - probe->send_time_ms);
                             probe->pending = false;
+                            full_match = true;
 
                             ESP_LOGI(TAG, "Hole-punch success! Peer %d RTT=%lums", peer_idx, (unsigned long)rtt);
                             microlink_wireguard_update_endpoint(ml, peer->vpn_ip, src_ip, src_port);
@@ -589,6 +598,20 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
                             peer->using_derp = false;
                             break;
                         }
+                    }
+
+                    // Unmatched direct PONG from a known peer — likely a spray/CMM probe
+                    // that wasn't registered. Accept it as a successful hole-punch.
+                    if (!full_match && peer->using_derp) {
+                        ESP_LOGI(TAG, "Spray hole-punch success! Peer %d src=%lu.%lu.%lu.%lu:%u",
+                                 peer_idx,
+                                 (unsigned long)(src_ip >> 24) & 0xFF,
+                                 (unsigned long)(src_ip >> 16) & 0xFF,
+                                 (unsigned long)(src_ip >> 8) & 0xFF,
+                                 (unsigned long)src_ip & 0xFF, src_port);
+                        microlink_wireguard_update_endpoint(ml, peer->vpn_ip, src_ip, src_port);
+                        peer->last_seen_ms = now;
+                        peer->using_derp = false;
                     }
                 } else {
                     peer->last_seen_ms = now;
@@ -601,7 +624,7 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
             ml->disco.peer_disco[peer_idx].active = true;
 
             // Parse endpoint list from CallMeMaybe payload
-            // Format after type+version+txid: N × 18 bytes (16B IPv4-mapped-IPv6 + 2B port BE)
+            // Format after type+version: N × 18 bytes (16B IPv4-mapped-IPv6 + 2B port BE)
             const size_t cmm_header = 1 + 1;  // type + version (no txid in CallMeMaybe)
             const size_t ep_size = 18;  // 16-byte IP + 2-byte port
             const uint8_t *ep_data = plaintext + cmm_header;
@@ -612,13 +635,15 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
                      peer_idx, peer->hostname, ep_count);
 
             if (ep_count == 0) {
-                // No endpoints — just mark active for regular probing
                 break;
             }
 
-            // Send DISCO ping to each candidate endpoint
+            // Send DISCO ping to each CMM endpoint WITHOUT overwriting peer->endpoints.
+            // Peer endpoints from coordination server are valuable and must be preserved.
+            // PONGs from CMM probes will be handled by the "spray hole-punch" fallback
+            // in the PONG handler (unmatched direct PONG from known peer).
             int probes_sent = 0;
-            for (int ep = 0; ep < ep_count && ep < MICROLINK_MAX_ENDPOINTS; ep++) {
+            for (int ep = 0; ep < ep_count && probes_sent < MICROLINK_MAX_ENDPOINTS - 1; ep++) {
                 const uint8_t *entry = ep_data + (ep * ep_size);
 
                 // Check for IPv4-mapped IPv6: bytes 10-11 = 0xFF 0xFF, bytes 0-9 = 0x00
@@ -645,34 +670,17 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
                          (unsigned long)entry[14], (unsigned long)entry[15],
                          port);
 
-                // Temporarily store endpoint for probing and send DISCO ping
-                // Use a free endpoint slot or overwrite existing
-                if ((uint8_t)ep < MICROLINK_MAX_ENDPOINTS - 1) {  // Reserve last slot for DERP
-                    peer->endpoints[ep].ip = ip_nbo;
-                    peer->endpoints[ep].port = port;
-                    peer->endpoints[ep].is_derp = false;
-
-                    // Build and send DISCO ping to this endpoint
-                    uint8_t ping_pkt[DISCO_MAX_PACKET_SIZE];
-                    uint8_t ping_txid[DISCO_TXID_LEN];
-                    int pkt_len = disco_build_ping(ml, peer, ping_txid, ping_pkt);
-                    if (pkt_len > 0) {
-                        esp_err_t send_err = microlink_disco_sendto(ml, ip_nbo, port,
-                                                                     ping_pkt, pkt_len);
-                        if (send_err == ESP_OK) {
-                            disco_probe_state_t *probe = &pending_probes[peer_idx][ep];
-                            memcpy(probe->txid, ping_txid, DISCO_TXID_LEN);
-                            probe->send_time_ms = microlink_get_time_ms();
-                            probe->pending = true;
-                            probes_sent++;
-                        }
+                // Build and send DISCO ping directly (don't store in peer->endpoints)
+                uint8_t ping_pkt[DISCO_MAX_PACKET_SIZE];
+                uint8_t ping_txid[DISCO_TXID_LEN];
+                int pkt_len = disco_build_ping(ml, peer, ping_txid, ping_pkt);
+                if (pkt_len > 0) {
+                    esp_err_t send_err = microlink_disco_sendto(ml, ip_nbo, port,
+                                                                 ping_pkt, pkt_len);
+                    if (send_err == ESP_OK) {
+                        probes_sent++;
                     }
                 }
-            }
-
-            // Update endpoint count to reflect CMM endpoints
-            if (ep_count > 0 && ep_count < MICROLINK_MAX_ENDPOINTS) {
-                peer->endpoint_count = (uint8_t)ep_count;
             }
 
             ESP_LOGI(TAG, "CallMeMaybe: sent %d probes to peer %d", probes_sent, peer_idx);
@@ -795,22 +803,21 @@ esp_err_t microlink_disco_probe_peers(microlink_t *ml) {
             disco_probe_endpoint(ml, i, ep);
         }
 
-        // Port prediction probes when Symmetric NAT detected and peer is on DERP
-        if (peer->using_derp && ml->stun.nat_type == MICROLINK_NAT_SYMMETRIC
-            && ml->stun.port_delta != 0 && peer->endpoint_count > 0) {
-            // Predict peer's next port allocation based on our observed delta
-            // Send probes to ±8 ports around each known endpoint
-            int delta = (int)ml->stun.port_delta;
-            if (delta < 0) delta = -delta;
-            if (delta == 0) delta = 1;
+        // Port-neighborhood spray when peer is still on DERP and has known endpoints.
+        // We can't know the peer's NAT allocation pattern, so spray ±256 ports
+        // around each known endpoint with step=1 (birthday-attack style).
+        // This gives a ~1-2% chance per round with 16 probes if the peer's NAT
+        // allocates sequentially within a ~1000-port window.
+        if (peer->using_derp && peer->endpoint_count > 0) {
             int spray_count = 0;
             for (uint8_t ep = 0; ep < peer->endpoint_count && spray_count < 16; ep++) {
                 if (peer->endpoints[ep].is_derp) continue;
                 uint16_t base_port = peer->endpoints[ep].port;
                 uint32_t ep_ip = peer->endpoints[ep].ip;
+                // Spray ±8 ports around the known endpoint (step=1)
                 for (int offset = -8; offset <= 8 && spray_count < 16; offset++) {
                     if (offset == 0) continue;  // Already probed by normal path
-                    int predicted = (int)base_port + offset * delta;
+                    int predicted = (int)base_port + offset;
                     if (predicted < 1024 || predicted > 65535) continue;
                     uint8_t pkt[DISCO_MAX_PACKET_SIZE];
                     uint8_t spray_txid[DISCO_TXID_LEN];
@@ -824,8 +831,8 @@ esp_err_t microlink_disco_probe_peers(microlink_t *ml) {
                 }
             }
             if (spray_count > 0) {
-                ESP_LOGI(TAG, "DISCO port-prediction: sent %d spray probes (delta=%d)",
-                         spray_count, (int)ml->stun.port_delta);
+                ESP_LOGI(TAG, "DISCO port-spray: sent %d probes around %d known endpoints",
+                         spray_count, peer->endpoint_count);
             }
         }
 
@@ -895,6 +902,11 @@ esp_err_t microlink_disco_update_paths(microlink_t *ml) {
         if (peer->last_seen_ms > 0 && (now - peer->last_seen_ms) > DISCO_STALE_THRESHOLD_MS) {
             ESP_LOGW(TAG, "Peer %d path stale (no response in %lums)",
                      i, (unsigned long)(now - peer->last_seen_ms));
+            // Reset to DERP mode → aggressive 5s probing + port spray
+            if (!peer->using_derp) {
+                ESP_LOGI(TAG, "Peer %d: direct path lost, reverting to DERP", i);
+                peer->using_derp = true;
+            }
         }
     }
 
