@@ -776,7 +776,7 @@ static err_t wg_derp_output_callback(const uint8_t *peer_public_key, const uint8
         return ERR_OK;  // Don't return error, WireGuard will retry
     }
 
-    ESP_LOGI(TAG, "DERP output callback: sending %zu byte WG packet to peer %02x%02x%02x%02x... (stack=%lu)",
+    ESP_LOGD(TAG, "DERP output callback: sending %zu byte WG packet to peer %02x%02x%02x%02x... (stack=%lu)",
              len, peer_public_key[0], peer_public_key[1], peer_public_key[2], peer_public_key[3],
              (unsigned long)stack_remaining);
 
@@ -802,7 +802,7 @@ void microlink_wireguard_process_derp_queue(void) {
 
     for (int i = 0; i < DERP_QUEUE_SIZE; i++) {
         if (derp_packet_queue[i].pending) {
-            ESP_LOGI(TAG, "Processing queued DERP packet (slot %d): %zu bytes",
+            ESP_LOGD(TAG, "Processing queued DERP packet (slot %d): %zu bytes",
                      i, derp_packet_queue[i].len);
 
             esp_err_t err = microlink_derp_send_raw(
@@ -863,4 +863,10 @@ esp_err_t microlink_wireguard_set_vpn_ip(microlink_t *ml, uint32_t vpn_ip) {
              microlink_vpn_ip_to_str(vpn_ip, ip_buf));
 
     return ESP_OK;
+}
+
+void microlink_wireguard_set_magicsock(int socket_fd) {
+    // Stub: our fork uses raw lwIP PCB instead of BSD sockets.
+    // The magicsock socket fd is unused in PCB mode.
+    (void)socket_fd;
 }

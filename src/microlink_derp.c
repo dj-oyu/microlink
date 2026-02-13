@@ -59,7 +59,7 @@ static const char *TAG = "ml_derp";
 
 /* Timeouts */
 #define DERP_CONNECT_TIMEOUT_MS 10000
-#define DERP_READ_TIMEOUT_MS    10
+#define DERP_READ_TIMEOUT_MS    1   // Low timeout for fast DERP streaming
 #define DERP_KEEPALIVE_MS       30000
 
 /* Maximum frame size */
@@ -93,7 +93,7 @@ static int derp_tls_write_all(microlink_t *ml, const uint8_t *data, size_t len) 
     int retries = 0;
     const int max_retries = 20;  // 20 * 10ms = 200ms max (socket has 100ms timeout)
 
-    ESP_LOGI(TAG, "[TLS-WR] >> len=%zu stack=%lu", len, (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+    ESP_LOGD(TAG, "[TLS-WR] >> len=%zu stack=%lu", len, (unsigned long)uxTaskGetStackHighWaterMark(NULL));
 
     while (written < len) {
         // Check socket state before write
@@ -101,7 +101,7 @@ static int derp_tls_write_all(microlink_t *ml, const uint8_t *data, size_t len) 
         socklen_t sock_err_len = sizeof(sock_err);
         getsockopt(ml->derp.sockfd, SOL_SOCKET, SO_ERROR, &sock_err, &sock_err_len);
 
-        ESP_LOGI(TAG, "[TLS-WR] ssl_write(%zu) sock_err=%d fd=%d",
+        ESP_LOGD(TAG, "[TLS-WR] ssl_write(%zu) sock_err=%d fd=%d",
                  len - written, sock_err, ml->derp.sockfd);
 
         // Use select() to check if socket is writable BEFORE calling mbedtls
@@ -115,15 +115,15 @@ static int derp_tls_write_all(microlink_t *ml, const uint8_t *data, size_t len) 
             ESP_LOGW(TAG, "[TLS-WR] Socket not writable (select=%d errno=%d), skip", sel_ret, errno);
             return -1;  // Don't block, let WireGuard retry later
         }
-        ESP_LOGI(TAG, "[TLS-WR] socket writable, calling ssl_write...");
+        ESP_LOGD(TAG, "[TLS-WR] socket writable, calling ssl_write...");
 
         int ret = mbedtls_ssl_write(&ml->derp.ssl, data + written, len - written);
-        ESP_LOGI(TAG, "[TLS-WR] ret=%d", ret);
+        ESP_LOGD(TAG, "[TLS-WR] ret=%d", ret);
 
         if (ret < 0) {
             if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
                 // Yield to other tasks to prevent busy-loop starvation
-                ESP_LOGI(TAG, "[TLS-WR] WANT retry=%d yield", retries);
+                ESP_LOGD(TAG, "[TLS-WR] WANT retry=%d yield", retries);
                 vTaskDelay(pdMS_TO_TICKS(10));
                 if (++retries > max_retries) {
                     ESP_LOGW(TAG, "TLS write timeout after %d retries (will retry later)", retries);
@@ -141,7 +141,7 @@ static int derp_tls_write_all(microlink_t *ml, const uint8_t *data, size_t len) 
         written += ret;
         retries = 0;  // Reset retry counter on successful write
     }
-    ESP_LOGI(TAG, "[TLS-WR] << OK %zu", written);
+    ESP_LOGD(TAG, "[TLS-WR] << OK %zu", written);
     return (int)written;
 }
 
@@ -870,15 +870,15 @@ esp_err_t microlink_derp_send_raw(microlink_t *ml, const uint8_t *dest_pubkey,
     memcpy(frame, dest_pubkey, 32);
     memcpy(frame + 32, data, len);
 
-    ESP_LOGI(TAG, "DERP SEND_PACKET: %zu bytes to peer %02x%02x%02x%02x%02x%02x%02x%02x...",
+    ESP_LOGD(TAG, "DERP SEND_PACKET: %zu bytes to peer %02x%02x%02x%02x%02x%02x%02x%02x...",
              len, dest_pubkey[0], dest_pubkey[1], dest_pubkey[2], dest_pubkey[3],
              dest_pubkey[4], dest_pubkey[5], dest_pubkey[6], dest_pubkey[7]);
 
     // Check if this is a DISCO packet
     if (len >= 6 && memcmp(data, "TS\xf0\x9f\x92\xac", 6) == 0) {
-        ESP_LOGI(TAG, "  >> DISCO packet detected in DERP send!");
+        ESP_LOGD(TAG, "  >> DISCO packet detected in DERP send!");
         if (len >= 38) {
-            ESP_LOGI(TAG, "  Sender disco_key in packet: %02x%02x%02x%02x%02x%02x%02x%02x...",
+            ESP_LOGD(TAG, "  Sender disco_key in packet: %02x%02x%02x%02x%02x%02x%02x%02x...",
                      data[6], data[7], data[8], data[9], data[10], data[11], data[12], data[13]);
         }
     }
@@ -886,7 +886,7 @@ esp_err_t microlink_derp_send_raw(microlink_t *ml, const uint8_t *dest_pubkey,
     esp_err_t err = derp_send_frame(ml, FRAME_SEND_PACKET, frame, frame_len);
     if (err == ESP_OK) {
         ml->stats.derp_packets_relayed++;
-        ESP_LOGI(TAG, "  DERP frame sent successfully");
+        ESP_LOGD(TAG, "  DERP frame sent successfully");
     } else {
         ESP_LOGE(TAG, "  DERP frame send FAILED: %s", esp_err_to_name(err));
     }
@@ -909,7 +909,7 @@ esp_err_t microlink_derp_receive(microlink_t *ml) {
     // This tells the server we're still here and this is our preferred DERP
     uint64_t now = microlink_get_time_ms();
     if (now - ml->derp.last_keepalive_ms > DERP_KEEPALIVE_MS) {
-        ESP_LOGI(TAG, "Sending DERP NotePreferred keepalive (calls=%lu)", (unsigned long)recv_call_count);
+        ESP_LOGD(TAG, "Sending DERP NotePreferred keepalive (calls=%lu)", (unsigned long)recv_call_count);
         // NotePreferred frame: 1 byte bool (0x01 = preferred)
         uint8_t preferred = 0x01;
         derp_send_frame(ml, FRAME_NOTE_PREFERRED, &preferred, 1);
@@ -918,7 +918,7 @@ esp_err_t microlink_derp_receive(microlink_t *ml) {
 
     // Debug log every 10 seconds to show we're polling
     if (now - last_recv_debug >= 10000) {
-        ESP_LOGI(TAG, "DERP receive polling: calls=%lu, connected=%d, sockfd=%d",
+        ESP_LOGD(TAG, "DERP receive polling: calls=%lu, connected=%d, sockfd=%d",
                  (unsigned long)recv_call_count, ml->derp.connected, ml->derp.sockfd);
         last_recv_debug = now;
     }
@@ -973,7 +973,7 @@ esp_err_t microlink_derp_receive(microlink_t *ml) {
             // Check if this is a DISCO packet (starts with "TS💬" magic)
             // DISCO packets must be routed to the DISCO handler, NOT WireGuard
             if (microlink_disco_is_disco_packet(payload, payload_len)) {
-                ESP_LOGI(TAG, "Received DISCO packet via DERP (%zu bytes)", payload_len);
+                ESP_LOGD(TAG, "Received DISCO packet via DERP (%zu bytes)", payload_len);
                 microlink_disco_handle_derp_packet(ml, src_key, payload, payload_len);
                 break;
             }

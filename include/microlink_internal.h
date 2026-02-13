@@ -156,11 +156,21 @@ typedef struct {
 /**
  * @brief STUN client state
  */
+typedef enum {
+    MICROLINK_NAT_UNKNOWN = 0,
+    MICROLINK_NAT_NONE,             ///< No NAT (public IP)
+    MICROLINK_NAT_CONE,             ///< Cone NAT (EIM: same port for all destinations)
+    MICROLINK_NAT_SYMMETRIC,        ///< Symmetric NAT (EDM: different port per destination)
+} microlink_nat_type_t;
+
 typedef struct {
     uint32_t public_ip;                 ///< Discovered public IP (host byte order)
     uint16_t public_port;               ///< Discovered public port
+    uint16_t public_port_alt;           ///< Port from alternate STUN server (for NAT type detection)
+    int16_t port_delta;                 ///< Port allocation delta (port_alt - port)
     uint64_t last_probe_ms;
     bool nat_detected;
+    microlink_nat_type_t nat_type;
 } microlink_stun_t;
 
 /**
@@ -209,6 +219,7 @@ typedef struct {
     } peer_disco[MICROLINK_MAX_PEERS];
 
     uint64_t last_global_disco_ms;
+    uint16_t local_port;                ///< Local port for DISCO socket (used in CallMeMaybe)
 } microlink_disco_t;
 
 /**
@@ -307,6 +318,7 @@ esp_err_t microlink_derp_receive(microlink_t *ml);
 esp_err_t microlink_stun_init(microlink_t *ml);
 esp_err_t microlink_stun_deinit(microlink_t *ml);
 esp_err_t microlink_stun_probe(microlink_t *ml);
+esp_err_t microlink_stun_detect_nat_type(microlink_t *ml);
 
 // DISCO protocol (microlink_disco.c)
 esp_err_t microlink_disco_init(microlink_t *ml);
@@ -321,6 +333,7 @@ esp_err_t microlink_disco_handle_direct_packet(microlink_t *ml, const uint8_t *d
                                                 uint32_t src_ip, uint16_t src_port);
 esp_err_t microlink_disco_sendto(microlink_t *ml, uint32_t dest_ip_nbo, uint16_t dest_port,
                                   const uint8_t *data, size_t len);
+esp_err_t microlink_disco_send_call_me_maybe(microlink_t *ml, uint32_t peer_vpn_ip);
 
 // WireGuard wrapper
 esp_err_t microlink_wireguard_init(microlink_t *ml);
@@ -328,6 +341,7 @@ esp_err_t microlink_wireguard_deinit(microlink_t *ml);
 esp_err_t microlink_wireguard_add_peer(microlink_t *ml, const microlink_peer_t *peer);
 esp_err_t microlink_wireguard_update_endpoint(microlink_t *ml, uint32_t vpn_ip,
                                                uint32_t endpoint_ip, uint16_t endpoint_port);
+esp_err_t microlink_wireguard_trigger_handshake(microlink_t *ml, uint32_t vpn_ip);
 esp_err_t microlink_wireguard_send(microlink_t *ml, uint32_t dest_vpn_ip,
                                    const uint8_t *data, size_t len);
 esp_err_t microlink_wireguard_receive(microlink_t *ml);
@@ -337,6 +351,7 @@ void microlink_wireguard_get_public_key(const microlink_t *ml, uint8_t *public_k
 esp_err_t microlink_wireguard_set_vpn_ip(microlink_t *ml, uint32_t vpn_ip);
 void microlink_wireguard_process_derp_queue(void);
 esp_err_t microlink_wireguard_enable_direct_output(microlink_t *ml);
+void microlink_wireguard_set_magicsock(int socket_fd);  // Set the unified socket for magicsock mode
 
 // Utility functions
 uint64_t microlink_get_time_ms(void);

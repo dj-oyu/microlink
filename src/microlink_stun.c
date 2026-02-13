@@ -96,7 +96,7 @@ static size_t stun_build_binding_request(uint8_t *buf, size_t buf_size) {
 static int stun_parse_binding_response(const uint8_t *buf, size_t len,
                                         uint32_t *mapped_ip, uint16_t *mapped_port) {
     if (len < STUN_HEADER_SIZE) {
-        ESP_LOGE(TAG, "Response too short: %zu bytes", len);
+        ESP_LOGE(TAG, "Response too short: %u bytes", (unsigned int)len);
         return -1;
     }
 
@@ -110,7 +110,7 @@ static int stun_parse_binding_response(const uint8_t *buf, size_t len,
     // Get message length
     uint16_t msg_len = ((uint16_t)buf[2] << 8) | buf[3];
     if (STUN_HEADER_SIZE + msg_len > len) {
-        ESP_LOGE(TAG, "Message truncated: claimed %u, have %zu", msg_len, len - STUN_HEADER_SIZE);
+        ESP_LOGE(TAG, "Message truncated: claimed %u, have %u", msg_len, (unsigned int)(len - STUN_HEADER_SIZE));
         return -1;
     }
 
@@ -336,4 +336,66 @@ esp_err_t microlink_stun_probe(microlink_t *ml) {
 
     ESP_LOGE(TAG, "All STUN servers failed");
     return ESP_FAIL;
+}
+
+esp_err_t microlink_stun_detect_nat_type(microlink_t *ml) {
+    if (!ml->disco.pcb) {
+        ESP_LOGE(TAG, "DISCO PCB not initialized — cannot detect NAT type");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Probe two different STUN servers and compare external ports
+    uint32_t ip1 = 0, ip2 = 0;
+    uint16_t port1 = 0, port2 = 0;
+
+    // Save/restore stun state so normal probe result is preserved
+    uint32_t saved_ip = ml->stun.public_ip;
+    uint16_t saved_port = ml->stun.public_port;
+
+    ESP_LOGI(TAG, "NAT type detection: probing two STUN servers...");
+
+    // Probe 1: Google STUN
+    if (stun_probe_server(ml, MICROLINK_STUN_SERVER_FALLBACK, MICROLINK_STUN_PORT_GOOGLE) == ESP_OK) {
+        ip1 = ml->stun.public_ip;
+        port1 = ml->stun.public_port;
+    } else {
+        ESP_LOGW(TAG, "NAT detect: first STUN probe failed");
+        ml->stun.public_ip = saved_ip;
+        ml->stun.public_port = saved_port;
+        ml->stun.nat_type = MICROLINK_NAT_UNKNOWN;
+        return ESP_FAIL;
+    }
+
+    // Probe 2: DERP STUN (different server, same local port)
+    if (stun_probe_server(ml, MICROLINK_STUN_SERVER, MICROLINK_STUN_PORT) == ESP_OK) {
+        ip2 = ml->stun.public_ip;
+        port2 = ml->stun.public_port;
+    } else {
+        ESP_LOGW(TAG, "NAT detect: second STUN probe failed");
+        // Restore first probe result
+        ml->stun.public_ip = ip1;
+        ml->stun.public_port = port1;
+        ml->stun.nat_type = MICROLINK_NAT_UNKNOWN;
+        return ESP_FAIL;
+    }
+
+    // Restore first probe as canonical result
+    ml->stun.public_ip = ip1;
+    ml->stun.public_port = port1;
+    ml->stun.public_port_alt = port2;
+    ml->stun.port_delta = (int16_t)((int32_t)port2 - (int32_t)port1);
+
+    if (ip1 == 0) {
+        ml->stun.nat_type = MICROLINK_NAT_UNKNOWN;
+        ESP_LOGW(TAG, "NAT detect: no public IP discovered");
+    } else if (port1 == port2) {
+        ml->stun.nat_type = MICROLINK_NAT_CONE;
+        ESP_LOGI(TAG, "NAT type: CONE (EIM) - port %u same for both servers", port1);
+    } else {
+        ml->stun.nat_type = MICROLINK_NAT_SYMMETRIC;
+        ESP_LOGW(TAG, "NAT type: SYMMETRIC (EDM) - port %u vs %u (delta=%d)",
+                 port1, port2, ml->stun.port_delta);
+    }
+
+    return ESP_OK;
 }
