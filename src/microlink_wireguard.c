@@ -864,3 +864,9 @@ esp_err_t microlink_wireguard_set_vpn_ip(microlink_t *ml, uint32_t vpn_ip) {
 
     return ESP_OK;
 }
+
+void microlink_wireguard_set_magicsock(int socket_fd) {
+    // Stub: our fork uses raw lwIP PCB instead of BSD sockets.
+    // The magicsock socket fd is unused in PCB mode.
+    (void)socket_fd;
+}

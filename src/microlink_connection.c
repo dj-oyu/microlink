@@ -94,22 +94,27 @@ void microlink_state_machine(microlink_t *ml) {
         case MICROLINK_STATE_FETCHING_PEERS: {
             // Run STUN FIRST so MapRequest includes our public endpoint
             // This is CRITICAL - without endpoints, peers can't reach us directly
-            // Use time_in_state to ensure STUN runs on first entry (time_in_state ~0)
-            // and wait 500ms for STUN to complete before sending MapRequest
-            if (ml->config.enable_stun && time_in_state < 100) {
+            // Use static flag to ensure STUN runs exactly once per state entry
+            static bool stun_attempted = false;
+            static uint64_t stun_start_time = 0;
+
+            if (ml->config.enable_stun && !stun_attempted) {
+                stun_attempted = true;
+                stun_start_time = now_ms;
                 // Dual-STUN NAT type detection: probes two servers, discovers
                 // public IP/port AND detects NAT type (cone vs symmetric).
-                // This replaces the separate stun_probe() — detect already
-                // does 2 probes and sets public_ip/public_port from the first.
                 ESP_LOGI(TAG, "Running dual-STUN NAT detection BEFORE MapRequest...");
                 microlink_stun_detect_nat_type(ml);
-                break;
+                break;  // Return and wait for STUN to complete
             }
 
-            // Wait a bit for STUN response before sending MapRequest
-            if (ml->config.enable_stun && time_in_state < 500) {
+            // Wait up to 500ms for STUN response before sending MapRequest
+            if (ml->config.enable_stun && stun_attempted && (now_ms - stun_start_time) < 500) {
                 break;  // Give STUN time to complete
             }
+
+            // Reset flag for next time we enter this state
+            stun_attempted = false;
 
             // Fetch peer list from coordination server
             // STUN should be done now so Endpoints are included in MapRequest
@@ -127,11 +132,30 @@ void microlink_state_machine(microlink_t *ml) {
         }
 
         case MICROLINK_STATE_CONFIGURING_WG: {
-            // Connect to DERP BEFORE adding peers so handshake initiation
-            // can be relayed immediately (VPN IP available from MapRequest)
+            // Connect to DERP FIRST - we need it for reliable handshakes
+            // DERP-first strategy: all handshakes go through DERP relay initially,
+            // then upgrade to direct UDP via DISCO if possible
             if (ml->config.enable_derp && !ml->derp.connected) {
-                ESP_LOGI(TAG, "Connecting to DERP relay...");
-                microlink_derp_connect(ml);
+                static bool derp_connect_started = false;
+                if (!derp_connect_started) {
+                    ESP_LOGI(TAG, "Connecting to DERP relay FIRST (for reliable handshakes)...");
+                    microlink_derp_connect(ml);
+                    derp_connect_started = true;
+                }
+                // Wait for DERP to connect before adding peers
+                if (!ml->derp.connected) {
+                    // Give DERP time to connect, but don't wait forever
+                    if (time_in_state > 10000) {
+                        ESP_LOGW(TAG, "DERP connection timeout, proceeding without DERP");
+                        derp_connect_started = false;  // Reset for next attempt
+                    } else {
+                        break;  // Wait for DERP
+                    }
+                }
+                derp_connect_started = false;  // Reset for reconnections
+                ESP_LOGI(TAG, "DERP connected, waiting for socket to stabilize...");
+                vTaskDelay(pdMS_TO_TICKS(500));  // Give TLS socket time to stabilize
+                ESP_LOGI(TAG, "Now adding peers...");
             }
 
             // Mark ALL peers as using DERP initially — DISCO will upgrade to direct
@@ -152,6 +176,10 @@ void microlink_state_machine(microlink_t *ml) {
                 if (ret != ESP_OK) {
                     ESP_LOGW(TAG, "Failed to add peer %d", i);
                 }
+                // Process queued DERP packets after each peer to prevent queue overflow
+                // Handshakes queue packets immediately, need to drain the queue
+                microlink_wireguard_process_derp_queue();
+                vTaskDelay(pdMS_TO_TICKS(50));  // Brief delay for DERP send to complete
             }
 
             // STUN already done in FETCHING_PEERS state
@@ -162,6 +190,9 @@ void microlink_state_machine(microlink_t *ml) {
         }
 
         case MICROLINK_STATE_CONNECTED: {
+            // Process any pending DERP queue items during transition
+            microlink_wireguard_process_derp_queue();
+
             // The poll task is now started in microlink_coordination_fetch_peers()
             // immediately after the long-poll is established, to avoid nonce desync.
             // Here we just transition to MONITORING after a brief delay.
@@ -296,12 +327,16 @@ void microlink_state_machine(microlink_t *ml) {
             // Drain DISCO socket every iteration — WG handshake responses and transport
             // packets arrive here and must be forwarded to WG promptly
             if (ml->config.enable_disco) {
+                // Drain DISCO PCB every iteration for prompt packet processing
                 microlink_disco_receive(ml);
 
+                // Always check for incoming DISCO packets (PONGs) - this must be frequent!
+                microlink_disco_update_paths(ml);
+
+                // Send probes less frequently
                 uint64_t since_disco = now_ms - ml->disco.last_global_disco_ms;
                 if (since_disco >= MICROLINK_DISCO_INTERVAL_MS) {
                     microlink_disco_probe_peers(ml);
-                    microlink_disco_update_paths(ml);
                     ml->disco.last_global_disco_ms = now_ms;
                 }
             }

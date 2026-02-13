@@ -26,6 +26,7 @@
 #include "lwip/netdb.h"    // For getaddrinfo DNS resolution
 #include "lwip/inet.h"     // For htonl, ntohl
 #include "lwip/tcp.h"      // For TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT
+#include "esp_netif.h"     // For getting local WiFi IP address
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -98,8 +99,14 @@ typedef struct {
 
 /**
  * @brief Log hex bytes for debugging crypto operations
+ * NOTE: Using %u instead of %zu because nano printf doesn't support %zu
  */
 static void log_hex(const char *label, const uint8_t *data, size_t len) {
+    if (!data || !label || len == 0) {
+        ESP_LOGW(TAG, "log_hex: invalid params (label=%p, data=%p, len=%u)",
+                 (void *)label, (void *)data, (unsigned int)len);
+        return;
+    }
     char hex[128];
     size_t hex_len = (len > 32) ? 32 : len;  // Show first 32 bytes max
     for (size_t i = 0; i < hex_len; i++) {
@@ -107,9 +114,9 @@ static void log_hex(const char *label, const uint8_t *data, size_t len) {
     }
     hex[hex_len * 2] = '\0';
     if (len > 32) {
-        ESP_LOGI(TAG, "%s (%zu bytes): %s...", label, len, hex);
+        ESP_LOGI(TAG, "%s (%u bytes): %s...", label, (unsigned int)len, hex);
     } else {
-        ESP_LOGI(TAG, "%s (%zu bytes): %s", label, len, hex);
+        ESP_LOGI(TAG, "%s (%u bytes): %s", label, (unsigned int)len, hex);
     }
 }
 
@@ -468,7 +475,7 @@ static size_t noise_write_message_1(noise_state_t *noise, uint16_t protocol_vers
     log_hex("Final h", noise->h, 32);
     log_hex("Final message 1", out, offset);
 
-    ESP_LOGI(TAG, "=== Message 1 complete: %zu bytes ===", offset);
+    ESP_LOGI(TAG, "=== Message 1 complete: %u bytes ===", (unsigned int)offset);
 
     return offset;  // Should be 101 bytes (5-byte header + 96-byte payload)
 }
@@ -533,7 +540,7 @@ static esp_err_t noise_read_message_2(noise_state_t *noise,
     // 4. Decrypt payload using k from last MixKey
     // The payload should be empty for IK pattern (just 16-byte MAC)
     size_t payload_ciphertext_len = msg_len - offset;
-    ESP_LOGI(TAG, "Payload ciphertext length: %zu bytes (should be 16 for empty payload)", payload_ciphertext_len);
+    ESP_LOGI(TAG, "Payload ciphertext length: %u bytes (should be 16 for empty payload)", (unsigned int)payload_ciphertext_len);
     log_hex("Ciphertext to decrypt", msg + offset, payload_ciphertext_len);
     log_hex("AD (h) for decryption", noise->h, NOISE_HASH_LEN);
 
@@ -546,7 +553,7 @@ static esp_err_t noise_read_message_2(noise_state_t *noise,
     }
 
     *payload_len_out = payload_ciphertext_len - NOISE_MAC_LEN;
-    ESP_LOGI(TAG, "Decrypted payload length: %zu bytes", *payload_len_out);
+    ESP_LOGI(TAG, "Decrypted payload length: %u bytes", (unsigned int)*payload_len_out);
 
     // MixHash the ciphertext (including MAC)
     noise_mix_hash(noise, msg + offset, payload_ciphertext_len);
@@ -751,9 +758,9 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     }
 
     // Check heap memory before TLS operations
-    ESP_LOGI(TAG, "Free heap before TLS: %lu bytes (min: %lu)",
-             esp_get_free_heap_size(),
-             esp_get_minimum_free_heap_size());
+    ESP_LOGI(TAG, "Free heap before TLS: %u bytes (min: %u)",
+             (unsigned int)esp_get_free_heap_size(),
+             (unsigned int)esp_get_minimum_free_heap_size());
 
     esp_err_t ret = ESP_FAIL;
     int sock = -1;  // Initialize socket to -1 for cleanup safety
@@ -798,7 +805,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     // The registration JSON will be sent AFTER the handshake completes
     size_t msg1_len = noise_write_message_1(&noise, TAILSCALE_PROTOCOL_VERSION, msg1);
 
-    ESP_LOGI(TAG, "Generated Noise message 1: %zu bytes (should be 101)", msg1_len);
+    ESP_LOGI(TAG, "Generated Noise message 1: %u bytes (should be 101)", (unsigned int)msg1_len);
     ESP_LOGI(TAG, "Registration payload will be sent after handshake: %s", payload);
 
     // Step 1: Establish plain TCP connection to port 80 (HTTP mode - happy path)
@@ -889,7 +896,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     }
     msg1_b64[b64_len] = '\0';
 
-    ESP_LOGI(TAG, "Base64-encoded Noise message 1: %zu bytes -> %zu bytes", msg1_len, b64_len);
+    ESP_LOGI(TAG, "Base64-encoded Noise message 1: %u bytes -> %u bytes", (unsigned int)msg1_len, (unsigned int)b64_len);
 
     // Step 3: Send HTTP POST with X-Tailscale-Handshake header
     size_t http_req_size = 512 + b64_len;
@@ -976,7 +983,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
                 size_t response_b64_len = response_end - response_header;
                 char *response_b64 = strndup(response_header, response_b64_len);
 
-                ESP_LOGI(TAG, "Found X-Tailscale-Response header (%zu bytes base64)", response_b64_len);
+                ESP_LOGI(TAG, "Found X-Tailscale-Response header (%u bytes base64)", (unsigned int)response_b64_len);
 
                 // Base64 decode to get Noise message 2
                 size_t decoded_len;
@@ -1245,7 +1252,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     }
 
     ESP_LOGI(TAG, "Handshake complete! Transport keys derived.");
-    ESP_LOGI(TAG, "Handshake response was %zu bytes (should be 0 for IK pattern)", handshake_response_len);
+    ESP_LOGI(TAG, "Handshake response was %u bytes (should be 0 for IK pattern)", (unsigned int)handshake_response_len);
     log_hex("tx_key", noise.tx_key, 32);
     log_hex("rx_key", noise.rx_key, 32);
 
@@ -1288,8 +1295,8 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
                 break;
             }
 
-            ESP_LOGI(TAG, "Proactive frame %d: type=0x%02x, len=%u, nonce=%llu",
-                     frame_idx, frame_type, frame_len, (unsigned long long)noise.rx_nonce);
+            ESP_LOGI(TAG, "Proactive frame %d: type=0x%02x, len=%u, nonce=%lu",
+                     frame_idx, frame_type, frame_len, (unsigned long)noise.rx_nonce);
 
             if (frame_type == 0x04 && frame_len >= NOISE_MAC_LEN) {
                 uint8_t *ciphertext = g_server_extra_data + offset + 3;
@@ -1328,7 +1335,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
                                 decrypted = true;
                                 used_nonce = try_nonce;
                                 used_key = "rx_key";
-                                ESP_LOGI(TAG, "  SUCCESS with rx_key nonce=%llu", (unsigned long long)try_nonce);
+                                ESP_LOGI(TAG, "  SUCCESS with rx_key nonce=%lu", (unsigned long)try_nonce);
                             }
                         }
 
@@ -1342,15 +1349,15 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
                                 decrypted = true;
                                 used_nonce = try_nonce;
                                 used_key = "tx_key";
-                                ESP_LOGI(TAG, "  SUCCESS with tx_key nonce=%llu", (unsigned long long)try_nonce);
+                                ESP_LOGI(TAG, "  SUCCESS with tx_key nonce=%lu", (unsigned long)try_nonce);
                             }
                         }
                     }
 
                     if (decrypted) {
                         plaintext[plaintext_len] = '\0';
-                        ESP_LOGI(TAG, "  Decrypted frame %d (%zu bytes) with %s nonce=%llu:",
-                                 frame_idx, plaintext_len, used_key, (unsigned long long)used_nonce);
+                        ESP_LOGI(TAG, "  Decrypted frame %d (%u bytes) with %s nonce=%lu:",
+                                 frame_idx, (unsigned int)plaintext_len, used_key, (unsigned long)used_nonce);
                         log_hex("  Plaintext", plaintext, plaintext_len < 64 ? plaintext_len : 64);
 
                         // Check for EarlyNoise magic
@@ -1399,7 +1406,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
                                                 ESP_LOGW(TAG, "  Failed to hex-decode challenge");
                                             }
                                         } else {
-                                            ESP_LOGW(TAG, "  Challenge hex string too short: %zu chars (need 64)", hex_len);
+                                            ESP_LOGW(TAG, "  Challenge hex string too short: %u chars (need 64)", (unsigned int)hex_len);
                                         }
                                     }
                                 }
@@ -1478,8 +1485,8 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
             frame_idx++;
         }
 
-        ESP_LOGI(TAG, "Processed %d proactive frames, rx_nonce now=%llu, early_noise=%d",
-                 frame_idx, (unsigned long long)noise.rx_nonce, early_noise_found);
+        ESP_LOGI(TAG, "Processed %d proactive frames, rx_nonce now=%lu, early_noise=%d",
+                 frame_idx, (unsigned long)noise.rx_nonce, early_noise_found);
 
         free(g_server_extra_data);
         g_server_extra_data = NULL;
@@ -1526,7 +1533,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     memcpy(h2_init + sizeof(H2_PREFACE) - 1, H2_SETTINGS, sizeof(H2_SETTINGS));
     memcpy(h2_init + sizeof(H2_PREFACE) - 1 + sizeof(H2_SETTINGS), H2_SETTINGS_ACK, sizeof(H2_SETTINGS_ACK));
 
-    ESP_LOGI(TAG, "HTTP/2 init data (%zu bytes):", h2_init_len);
+    ESP_LOGI(TAG, "HTTP/2 init data (%u bytes):", (unsigned int)h2_init_len);
     log_hex("H2 init", h2_init, h2_init_len);
 
     // Encrypt and send HTTP/2 preface as one Noise frame
@@ -1545,7 +1552,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     encrypted_payload[1] = (encrypted_len >> 8) & 0xFF;
     encrypted_payload[2] = encrypted_len & 0xFF;
 
-    ESP_LOGI(TAG, "Encrypting HTTP/2 preface with tx_nonce=%llu", (unsigned long long)noise.tx_nonce);
+    ESP_LOGI(TAG, "Encrypting HTTP/2 preface with tx_nonce=%lu", (unsigned long)noise.tx_nonce);
     log_hex("tx_key for encryption", noise.tx_key, 32);
 
     ret = noise_encrypt(noise.tx_key, noise.tx_nonce++,
@@ -1580,8 +1587,8 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     // Read server's HTTP/2 preface response (SETTINGS frames etc.)
     // The server will respond to our HTTP/2 preface with its own preface
     // We MUST read and decrypt these frames to keep nonce in sync
-    ESP_LOGI(TAG, "Reading server HTTP/2 preface frames (rx_nonce=%llu)...",
-             (unsigned long long)noise.rx_nonce);
+    ESP_LOGI(TAG, "Reading server HTTP/2 preface frames (rx_nonce=%lu)...",
+             (unsigned long)noise.rx_nonce);
 
     // Give server time to respond
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -1651,14 +1658,14 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
             size_t plain_len = flen - NOISE_MAC_LEN;
             uint8_t *plain = malloc(plain_len + 1);
             if (plain) {
-                ESP_LOGI(TAG, "Attempting decrypt with rx_nonce=%llu", (unsigned long long)noise.rx_nonce);
+                ESP_LOGI(TAG, "Attempting decrypt with rx_nonce=%lu", (unsigned long)noise.rx_nonce);
                 ret = noise_decrypt(noise.rx_key, noise.rx_nonce,
                                    NULL, 0,
                                    frame_data, flen,
                                    plain);
                 if (ret == ESP_OK) {
                     plain[plain_len] = '\0';
-                    ESP_LOGI(TAG, "Decrypted server frame %d (%zu bytes):", frame_attempt, plain_len);
+                    ESP_LOGI(TAG, "Decrypted server frame %d (%u bytes):", frame_attempt, (unsigned int)plain_len);
                     log_hex("Decrypted", plain, plain_len < 64 ? plain_len : 64);
 
                     // Check for HTTP/2 frames inside
@@ -1671,8 +1678,8 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
                     noise.rx_nonce++;
                     server_frames_read++;
                 } else {
-                    ESP_LOGW(TAG, "Failed to decrypt frame %d with nonce %llu",
-                             frame_attempt, (unsigned long long)noise.rx_nonce);
+                    ESP_LOGW(TAG, "Failed to decrypt frame %d with nonce %lu",
+                             frame_attempt, (unsigned long)noise.rx_nonce);
                 }
                 free(plain);
             }
@@ -1689,8 +1696,8 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     tv_long.tv_usec = 0;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv_long, sizeof(tv_long));
 
-    ESP_LOGI(TAG, "Consumed %d server HTTP/2 preface frames, rx_nonce now=%llu",
-             server_frames_read, (unsigned long long)noise.rx_nonce);
+    ESP_LOGI(TAG, "Consumed %d server HTTP/2 preface frames, rx_nonce now=%lu",
+             server_frames_read, (unsigned long)noise.rx_nonce);
 
     // First send RegisterRequest to /machine/register, then MapRequest to /machine/map
     // Build HTTP/2 HEADERS frame with POST request
@@ -1774,8 +1781,8 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     }
 
     size_t json_payload_len = strlen(reg_req_str);
-    ESP_LOGI(TAG, "RegisterRequest payload (%zu bytes): %.200s%s",
-             json_payload_len, reg_req_str, json_payload_len > 200 ? "..." : "");
+    ESP_LOGI(TAG, "RegisterRequest payload (%u bytes): %.200s%s",
+             (unsigned int)json_payload_len, reg_req_str, json_payload_len > 200 ? "..." : "");
 
     // Build HTTP/2 HEADERS frame (simplified - no HPACK compression)
     // Frame format: 9-byte header + payload
@@ -1884,8 +1891,8 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     memcpy(h2_combined + headers_frame_len, h2_data_frame, data_frame_len);
     free(h2_data_frame);
 
-    ESP_LOGI(TAG, "HTTP/2 request (%zu bytes): HEADERS(%zu) + DATA(%zu)",
-             h2_total_len, headers_frame_len, data_frame_len);
+    ESP_LOGI(TAG, "HTTP/2 request (%u bytes): HEADERS(%u) + DATA(%u)",
+             (unsigned int)h2_total_len, (unsigned int)headers_frame_len, (unsigned int)data_frame_len);
     log_hex("H2 HEADERS frame", h2_combined, headers_frame_len < 64 ? headers_frame_len : 64);
 
     // Encrypt and send
@@ -1903,7 +1910,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     enc_buf[1] = (enc_len >> 8) & 0xFF;
     enc_buf[2] = enc_len & 0xFF;
 
-    ESP_LOGI(TAG, "Encrypting RegisterRequest with tx_nonce=%llu", (unsigned long long)noise.tx_nonce);
+    ESP_LOGI(TAG, "Encrypting RegisterRequest with tx_nonce=%lu", (unsigned long)noise.tx_nonce);
 
     ret = noise_encrypt(noise.tx_key, noise.tx_nonce++,
                        NULL, 0,
@@ -1982,8 +1989,8 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
         uint8_t resp_type = resp_header[0];
         uint16_t resp_payload_len = (resp_header[1] << 8) | resp_header[2];
 
-        ESP_LOGI(TAG, "Response frame %d: type=0x%02x, length=%u, rx_nonce=%llu",
-                 frame_count, resp_type, resp_payload_len, (unsigned long long)noise.rx_nonce);
+        ESP_LOGI(TAG, "Response frame %d: type=0x%02x, length=%u, rx_nonce=%lu",
+                 frame_count, resp_type, resp_payload_len, (unsigned long)noise.rx_nonce);
 
         if (resp_type == 0x03) {
             ESP_LOGW(TAG, "Server sent ERROR response (type 0x03)!");
@@ -2049,8 +2056,8 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
         free(resp_encrypted);
 
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to decrypt frame %d with rx_nonce=%llu",
-                     frame_count, (unsigned long long)noise.rx_nonce);
+            ESP_LOGE(TAG, "Failed to decrypt frame %d with rx_nonce=%lu",
+                     frame_count, (unsigned long)noise.rx_nonce);
             free(decrypted_frame);
             free(h2_buffer);
             close(sock);
@@ -2060,7 +2067,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
 
         noise.rx_nonce++;
 
-        ESP_LOGI(TAG, "Decrypted frame %d (%zu bytes)", frame_count, decrypted_len);
+        ESP_LOGI(TAG, "Decrypted frame %d (%u bytes)", frame_count, (unsigned int)decrypted_len);
         log_hex("Decrypted", decrypted_frame, decrypted_len < 64 ? decrypted_len : 64);
 
         // Parse HTTP/2 frame header to check for END_STREAM flag
@@ -2087,7 +2094,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
         free(decrypted_frame);
     }
 
-    ESP_LOGI(TAG, "Accumulated %zu bytes of HTTP/2 data", h2_buffer_len);
+    ESP_LOGI(TAG, "Accumulated %u bytes of HTTP/2 data", (unsigned int)h2_buffer_len);
 
     // Now parse all accumulated HTTP/2 frames
     uint8_t *frame_ptr = h2_buffer;
@@ -2164,8 +2171,8 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     memcpy(json_copy, json_data, json_len);
     json_copy[json_len] = '\0';
 
-    ESP_LOGI(TAG, "Parsing JSON (%zu bytes): %.200s%s",
-             json_len, (char *)json_copy, json_len > 200 ? "..." : "");
+    ESP_LOGI(TAG, "Parsing JSON (%u bytes): %.200s%s",
+             (unsigned int)json_len, (char *)json_copy, json_len > 200 ? "..." : "");
 
     // Parse JSON response (Tailscale RegisterResponse)
     // RegisterResponse contains: User, Login, MachineAuthorized, AuthURL, Error, etc.
@@ -2213,7 +2220,7 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
         }
         cJSON *user_id = cJSON_GetObjectItem(user, "ID");
         if (user_id && cJSON_IsNumber(user_id)) {
-            ESP_LOGI(TAG, "User ID: %lld", (long long)user_id->valuedouble);
+            ESP_LOGI(TAG, "User ID: %ld", (long)user_id->valuedouble);
         }
     }
 
@@ -2240,9 +2247,9 @@ esp_err_t microlink_coordination_register(microlink_t *ml) {
     ml->coordination.next_stream_id = 3;  // Stream 1 was used for register, next is 3
 
     ESP_LOGI(TAG, "Registration successful! Device registered with Tailscale.");
-    ESP_LOGI(TAG, "Socket stored for MapRequest, tx_nonce=%llu, rx_nonce=%llu, next_stream=%lu",
-             (unsigned long long)ml->coordination.tx_nonce,
-             (unsigned long long)ml->coordination.rx_nonce,
+    ESP_LOGI(TAG, "Socket stored for MapRequest, tx_nonce=%lu, rx_nonce=%lu, next_stream=%lu",
+             (unsigned long)ml->coordination.tx_nonce,
+             (unsigned long)ml->coordination.rx_nonce,
              (unsigned long)ml->coordination.next_stream_id);
 
     // NOTE: VPN IP comes from MapResponse, not RegisterResponse
@@ -2374,30 +2381,56 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
 
     cJSON_AddItemToObject(map_req, "Hostinfo", hostinfo);
 
-    // Endpoints - our public IP:port discovered via STUN
+    // Endpoints - both local and STUN-discovered addresses
     // This tells other peers where to reach us directly
-    if (ml->stun.public_ip != 0 && ml->stun.public_port != 0) {
+    // Type 1 = EndpointLocal (local network address)
+    // Type 2 = EndpointSTUN (discovered via STUN - NAT-traversal)
+    {
         cJSON *endpoints = cJSON_CreateArray();
-        char endpoint_str[32];
-        snprintf(endpoint_str, sizeof(endpoint_str), "%lu.%lu.%lu.%lu:%u",
-                 (unsigned long)((ml->stun.public_ip >> 24) & 0xFF),
-                 (unsigned long)((ml->stun.public_ip >> 16) & 0xFF),
-                 (unsigned long)((ml->stun.public_ip >> 8) & 0xFF),
-                 (unsigned long)(ml->stun.public_ip & 0xFF),
-                 ml->stun.public_port);
-        cJSON_AddItemToArray(endpoints, cJSON_CreateString(endpoint_str));
-        cJSON_AddItemToObject(map_req, "Endpoints", endpoints);
-
-        // EndpointTypes tells the server how each endpoint was discovered
-        // Type 2 = EndpointSTUN (discovered via STUN)
-        // This is CRITICAL - without it, server may ignore our endpoints!
         cJSON *endpoint_types = cJSON_CreateArray();
-        cJSON_AddItemToArray(endpoint_types, cJSON_CreateNumber(2));  // EndpointSTUN
-        cJSON_AddItemToObject(map_req, "EndpointTypes", endpoint_types);
+        int endpoint_count = 0;
 
-        ESP_LOGI(TAG, "Advertising endpoint: %s (type: STUN)", endpoint_str);
-    } else {
-        ESP_LOGW(TAG, "No public endpoint discovered via STUN");
+        // Add local WiFi endpoint (EndpointLocal = 1)
+        // This allows peers on the same LAN to connect directly
+        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        esp_netif_ip_info_t ip_info;
+        if (netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+            char local_ep[32];
+            snprintf(local_ep, sizeof(local_ep), "%d.%d.%d.%d:%u",
+                     (ip_info.ip.addr) & 0xFF,
+                     (ip_info.ip.addr >> 8) & 0xFF,
+                     (ip_info.ip.addr >> 16) & 0xFF,
+                     (ip_info.ip.addr >> 24) & 0xFF,
+                     ml->wireguard.listen_port);
+            cJSON_AddItemToArray(endpoints, cJSON_CreateString(local_ep));
+            cJSON_AddItemToArray(endpoint_types, cJSON_CreateNumber(1));  // EndpointLocal
+            endpoint_count++;
+            ESP_LOGI(TAG, "Advertising local endpoint: %s (type: Local)", local_ep);
+        }
+
+        // Add STUN endpoint (EndpointSTUN = 2) if available
+        if (ml->stun.public_ip != 0 && ml->stun.public_port != 0) {
+            char stun_ep[32];
+            snprintf(stun_ep, sizeof(stun_ep), "%lu.%lu.%lu.%lu:%u",
+                     (unsigned long)((ml->stun.public_ip >> 24) & 0xFF),
+                     (unsigned long)((ml->stun.public_ip >> 16) & 0xFF),
+                     (unsigned long)((ml->stun.public_ip >> 8) & 0xFF),
+                     (unsigned long)(ml->stun.public_ip & 0xFF),
+                     ml->stun.public_port);
+            cJSON_AddItemToArray(endpoints, cJSON_CreateString(stun_ep));
+            cJSON_AddItemToArray(endpoint_types, cJSON_CreateNumber(2));  // EndpointSTUN
+            endpoint_count++;
+            ESP_LOGI(TAG, "Advertising STUN endpoint: %s (type: STUN)", stun_ep);
+        }
+
+        if (endpoint_count > 0) {
+            cJSON_AddItemToObject(map_req, "Endpoints", endpoints);
+            cJSON_AddItemToObject(map_req, "EndpointTypes", endpoint_types);
+        } else {
+            cJSON_Delete(endpoints);
+            cJSON_Delete(endpoint_types);
+            ESP_LOGW(TAG, "No endpoints discovered - peers can only reach us via DERP");
+        }
     }
 
     // NOTE: DERP home region is communicated via Hostinfo.NetInfo.PreferredDERP (above)
@@ -2427,7 +2460,7 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
     }
 
     size_t json_len = strlen(map_req_str);
-    ESP_LOGI(TAG, "MapRequest (%zu bytes): %.150s%s", json_len, map_req_str, json_len > 150 ? "..." : "");
+    ESP_LOGI(TAG, "MapRequest (%u bytes): %.150s%s", (unsigned int)json_len, map_req_str, json_len > 150 ? "..." : "");
 
     // Build HPACK headers for /machine/map
     uint8_t hpack_headers[256];
@@ -2526,7 +2559,7 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
     enc_buf[1] = (enc_len >> 8) & 0xFF;
     enc_buf[2] = enc_len & 0xFF;
 
-    ESP_LOGI(TAG, "Encrypting MapRequest with tx_nonce=%llu", (unsigned long long)ml->coordination.tx_nonce);
+    ESP_LOGI(TAG, "Encrypting MapRequest with tx_nonce=%lu", (unsigned long)ml->coordination.tx_nonce);
 
     ret = noise_encrypt(ml->coordination.tx_key, ml->coordination.tx_nonce++,
                         NULL, 0, h2_combined, h2_total_len, enc_buf + 3);
@@ -2630,22 +2663,22 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
             }
             // Got some data before timeout - that's OK for Stream=true mode
             // In long-poll, the server may not send END_STREAM until connection closes
-            ESP_LOGI(TAG, "Recv timeout after %d calls with %zu bytes, processing...",
-                     recv_idx, h2_buffer_len);
+            ESP_LOGI(TAG, "Recv timeout after %d calls with %u bytes, processing...",
+                     recv_idx, (unsigned int)h2_buffer_len);
             break;
         }
 
         got_any_data = true;
 
         tcp_buffer_len += recv_len;
-        ESP_LOGD(TAG, "Recv %d: +%d bytes (tcp_buffer=%zu)", recv_idx + 1, recv_len, tcp_buffer_len);
+        ESP_LOGD(TAG, "Recv %d: +%d bytes (tcp_buffer=%u)", recv_idx + 1, recv_len, (unsigned int)tcp_buffer_len);
 
         // Process complete Noise frames from tcp_buffer
         size_t consumed = 0;
         while (consumed + 3 <= tcp_buffer_len) {
             // Check frame type
             if (tcp_buffer[consumed] != 0x04) {
-                ESP_LOGE(TAG, "Invalid Noise frame type 0x%02x at offset %zu", tcp_buffer[consumed], consumed);
+                ESP_LOGE(TAG, "Invalid Noise frame type 0x%02x at offset %u", tcp_buffer[consumed], (unsigned int)consumed);
                 // Dump some context for debugging
                 ESP_LOGE(TAG, "Context: %02x %02x %02x %02x %02x",
                          tcp_buffer[consumed], tcp_buffer[consumed+1], tcp_buffer[consumed+2],
@@ -2662,7 +2695,7 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
             // Check if we have the complete frame
             if (consumed + frame_total > tcp_buffer_len) {
                 // Incomplete frame - wait for more data
-                ESP_LOGD(TAG, "Partial frame: have %zu, need %zu", tcp_buffer_len - consumed, frame_total);
+                ESP_LOGD(TAG, "Partial frame: have %u, need %u", (unsigned int)(tcp_buffer_len - consumed), (unsigned int)frame_total);
                 break;
             }
 
@@ -2679,8 +2712,8 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
                                 NULL, 0, tcp_buffer + consumed + 3, payload_len, decrypted);
 
             if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to decrypt Noise frame (nonce=%llu)",
-                         (unsigned long long)(ml->coordination.rx_nonce - 1));
+                ESP_LOGE(TAG, "Failed to decrypt Noise frame (nonce=%lu)",
+                         (unsigned long)(ml->coordination.rx_nonce - 1));
                 free(decrypted);
                 free(tcp_buffer);
                 free(h2_buffer);
@@ -2726,9 +2759,9 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
     }
 
     free(tcp_buffer);
-    ESP_LOGI(TAG, "Received complete response: %zu bytes of HTTP/2 data", h2_buffer_len);
+    ESP_LOGI(TAG, "Received complete response: %u bytes of HTTP/2 data", (unsigned int)h2_buffer_len);
 
-    ESP_LOGI(TAG, "Total HTTP/2 data accumulated: %zu bytes", h2_buffer_len);
+    ESP_LOGI(TAG, "Total HTTP/2 data accumulated: %u bytes", (unsigned int)h2_buffer_len);
 
     // Accumulate ALL DATA frame payloads into a single JSON buffer
     // MapResponse can be large (includes all DERP region info)
@@ -2809,7 +2842,7 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
             if (json_total_len + frame_len <= 65536) {
                 memcpy(json_buffer + json_total_len, h2_buffer + pos + 9, frame_len);
                 json_total_len += frame_len;
-                ESP_LOGD(TAG, "Accumulated DATA frame: %d bytes (total: %zu)", frame_len, json_total_len);
+                ESP_LOGD(TAG, "Accumulated DATA frame: %d bytes (total: %u)", frame_len, (unsigned int)json_total_len);
             }
         }
 
@@ -2820,8 +2853,8 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
         ESP_LOGW(TAG, "No DATA frames found in response");
         // Log the raw H2 buffer to see what we got (likely HEADERS with error status)
         if (h2_buffer_len > 0) {
-            ESP_LOGW(TAG, "H2 buffer (%zu bytes): %02x %02x %02x %02x %02x %02x %02x %02x...",
-                     h2_buffer_len,
+            ESP_LOGW(TAG, "H2 buffer (%u bytes): %02x %02x %02x %02x %02x %02x %02x %02x...",
+                     (unsigned int)h2_buffer_len,
                      h2_buffer[0], h2_buffer[1], h2_buffer[2], h2_buffer[3],
                      h2_buffer[4], h2_buffer[5], h2_buffer[6], h2_buffer[7]);
             // Check if first frame is HEADERS (type 0x01)
@@ -2920,12 +2953,12 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
         json_str[json_str_len] = '\0';
     }
 
-    ESP_LOGI(TAG, "MapResponse JSON (%zu bytes): %.200s%s", json_str_len, json_str, json_str_len > 200 ? "..." : "");
+    ESP_LOGI(TAG, "MapResponse JSON (%u bytes): %.200s%s", (unsigned int)json_str_len, json_str, json_str_len > 200 ? "..." : "");
 
     cJSON *root = cJSON_Parse(json_str);
 
     if (!root) {
-        ESP_LOGE(TAG, "Failed to parse MapResponse JSON (len=%zu)", json_str_len);
+        ESP_LOGE(TAG, "Failed to parse MapResponse JSON (len=%u)", (unsigned int)json_str_len);
         // Log the first 64 bytes to help debug the format
         if (json_str && json_str_len > 0) {
             ESP_LOGE(TAG, "JSON start: %.64s", json_str);
@@ -3178,9 +3211,10 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
                     if (cJSON_IsString(ep)) {
                         unsigned int ea, eb, ec, ed, eport;
                         if (sscanf(ep->valuestring, "%u.%u.%u.%u:%u", &ea, &eb, &ec, &ed, &eport) == 5) {
-                            peer->endpoints[ep_idx].ip = htonl((ea << 24) | (eb << 16) | (ec << 8) | ed);
+                            peer->endpoints[ep_idx].addr.ip4 = htonl((ea << 24) | (eb << 16) | (ec << 8) | ed);
                             peer->endpoints[ep_idx].port = (uint16_t)eport;
-                            peer->endpoints[ep_idx].is_derp = false;
+                            peer->endpoints[ep_idx].is_ipv6 = 0;
+                            peer->endpoints[ep_idx].is_derp = 0;
                             ep_idx++;
                         }
                     }
@@ -3289,7 +3323,7 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
 
     if (longpoll_str) {
         size_t longpoll_json_len = strlen(longpoll_str);
-        ESP_LOGI(TAG, "Long-poll MapRequest (%zu bytes): %s", longpoll_json_len, longpoll_str);
+        ESP_LOGI(TAG, "Long-poll MapRequest (%u bytes): %s", (unsigned int)longpoll_json_len, longpoll_str);
 
         // Build HTTP/2 frame for long-poll request
         uint8_t longpoll_hpack[128];
@@ -3501,25 +3535,50 @@ esp_err_t microlink_coordination_heartbeat(microlink_t *ml) {
 
     cJSON_AddItemToObject(map_req, "Hostinfo", hostinfo);
 
-    // Include Endpoints if we have STUN info - CRITICAL for peers to reach us!
-    if (ml->stun.public_ip != 0 && ml->stun.public_port != 0) {
+    // Include Endpoints - both local and STUN (CRITICAL for peers to reach us!)
+    {
         cJSON *endpoints = cJSON_CreateArray();
-        char endpoint_str[32];
-        snprintf(endpoint_str, sizeof(endpoint_str), "%lu.%lu.%lu.%lu:%u",
-                 (unsigned long)((ml->stun.public_ip >> 24) & 0xFF),
-                 (unsigned long)((ml->stun.public_ip >> 16) & 0xFF),
-                 (unsigned long)((ml->stun.public_ip >> 8) & 0xFF),
-                 (unsigned long)(ml->stun.public_ip & 0xFF),
-                 ml->stun.public_port);
-        cJSON_AddItemToArray(endpoints, cJSON_CreateString(endpoint_str));
-        cJSON_AddItemToObject(map_req, "Endpoints", endpoints);
-
-        // EndpointTypes - Type 2 = EndpointSTUN
         cJSON *endpoint_types = cJSON_CreateArray();
-        cJSON_AddItemToArray(endpoint_types, cJSON_CreateNumber(2));
-        cJSON_AddItemToObject(map_req, "EndpointTypes", endpoint_types);
+        int endpoint_count = 0;
 
-        ESP_LOGI(TAG, "Heartbeat advertising endpoint: %s (type: STUN)", endpoint_str);
+        // Add local WiFi endpoint (EndpointLocal = 1)
+        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        esp_netif_ip_info_t ip_info;
+        if (netif && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+            char local_ep[32];
+            snprintf(local_ep, sizeof(local_ep), "%d.%d.%d.%d:%u",
+                     (ip_info.ip.addr) & 0xFF,
+                     (ip_info.ip.addr >> 8) & 0xFF,
+                     (ip_info.ip.addr >> 16) & 0xFF,
+                     (ip_info.ip.addr >> 24) & 0xFF,
+                     ml->wireguard.listen_port);
+            cJSON_AddItemToArray(endpoints, cJSON_CreateString(local_ep));
+            cJSON_AddItemToArray(endpoint_types, cJSON_CreateNumber(1));  // EndpointLocal
+            endpoint_count++;
+        }
+
+        // Add STUN endpoint (EndpointSTUN = 2) if available
+        if (ml->stun.public_ip != 0 && ml->stun.public_port != 0) {
+            char stun_ep[32];
+            snprintf(stun_ep, sizeof(stun_ep), "%lu.%lu.%lu.%lu:%u",
+                     (unsigned long)((ml->stun.public_ip >> 24) & 0xFF),
+                     (unsigned long)((ml->stun.public_ip >> 16) & 0xFF),
+                     (unsigned long)((ml->stun.public_ip >> 8) & 0xFF),
+                     (unsigned long)(ml->stun.public_ip & 0xFF),
+                     ml->stun.public_port);
+            cJSON_AddItemToArray(endpoints, cJSON_CreateString(stun_ep));
+            cJSON_AddItemToArray(endpoint_types, cJSON_CreateNumber(2));  // EndpointSTUN
+            endpoint_count++;
+        }
+
+        if (endpoint_count > 0) {
+            cJSON_AddItemToObject(map_req, "Endpoints", endpoints);
+            cJSON_AddItemToObject(map_req, "EndpointTypes", endpoint_types);
+            ESP_LOGI(TAG, "Heartbeat advertising %d endpoints", endpoint_count);
+        } else {
+            cJSON_Delete(endpoints);
+            cJSON_Delete(endpoint_types);
+        }
     }
 
     char *map_req_str = cJSON_PrintUnformatted(map_req);
@@ -3831,7 +3890,7 @@ esp_err_t microlink_coordination_poll_updates(microlink_t *ml) {
 
             tcp_buffer_len += recv_len;
             got_data = true;
-            ESP_LOGD(TAG, "Poll recv: +%d bytes (total=%zu)", recv_len, tcp_buffer_len);
+            ESP_LOGD(TAG, "Poll recv: +%d bytes (total=%u)", recv_len, (unsigned int)tcp_buffer_len);
         }
 
         // If no data was read in this iteration, check if we should wait for more
@@ -3853,10 +3912,10 @@ esp_err_t microlink_coordination_poll_updates(microlink_t *ml) {
 
         // Debug: Log buffer info if we got data and first byte isn't 0x04
         if (tcp_buffer_len > 0 && tcp_buffer[0] != 0x04) {
-            ESP_LOGW(TAG, "poll_updates: buffer not aligned! len=%zu, rx_nonce=%llu, first 16 bytes:",
-                     tcp_buffer_len, (unsigned long long)ml->coordination.rx_nonce);
+            ESP_LOGW(TAG, "poll_updates: buffer not aligned! len=%u, rx_nonce=%lu, first 16 bytes:",
+                     (unsigned int)tcp_buffer_len, (unsigned long)ml->coordination.rx_nonce);
             for (size_t i = 0; i < 16 && i < tcp_buffer_len; i++) {
-                ESP_LOGW(TAG, "  [%zu] = 0x%02x", i, tcp_buffer[i]);
+                ESP_LOGW(TAG, "  [%u] = 0x%02x", (unsigned int)i, tcp_buffer[i]);
             }
         }
 
@@ -3865,9 +3924,9 @@ esp_err_t microlink_coordination_poll_updates(microlink_t *ml) {
             if (tcp_buffer[consumed] != 0x04) {
                 // Only log first few unexpected bytes to avoid spam
                 if (unexpected_count < 3) {
-                    ESP_LOGW(TAG, "Unexpected frame type at offset %zu: 0x%02x (total_len=%zu, rx_nonce=%llu)",
-                             consumed, tcp_buffer[consumed], tcp_buffer_len,
-                             (unsigned long long)ml->coordination.rx_nonce);
+                    ESP_LOGW(TAG, "Unexpected frame type at offset %u: 0x%02x (total_len=%u, rx_nonce=%lu)",
+                             (unsigned int)consumed, tcp_buffer[consumed], (unsigned int)tcp_buffer_len,
+                             (unsigned long)ml->coordination.rx_nonce);
                     unexpected_count++;
                 }
                 consumed++;  // Skip unknown byte and try to resync
@@ -3882,8 +3941,8 @@ esp_err_t microlink_coordination_poll_updates(microlink_t *ml) {
         if (consumed + frame_total > tcp_buffer_len) {
             // Incomplete frame - this shouldn't happen in non-blocking mode
             // but log it for debugging
-            ESP_LOGD(TAG, "Partial Noise frame: have %zu, need %zu",
-                     tcp_buffer_len - consumed, frame_total);
+            ESP_LOGD(TAG, "Partial Noise frame: have %u, need %u",
+                     (unsigned int)(tcp_buffer_len - consumed), (unsigned int)frame_total);
             break;
         }
 
@@ -3905,8 +3964,8 @@ esp_err_t microlink_coordination_poll_updates(microlink_t *ml) {
                             NULL, 0, tcp_buffer + consumed + 3, payload_len, decrypted);
 
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to decrypt long-poll Noise frame (nonce=%llu)",
-                     (unsigned long long)(ml->coordination.rx_nonce - 1));
+            ESP_LOGE(TAG, "Failed to decrypt long-poll Noise frame (nonce=%lu)",
+                     (unsigned long)(ml->coordination.rx_nonce - 1));
             free(decrypted);
             break;
         }
@@ -3925,8 +3984,8 @@ esp_err_t microlink_coordination_poll_updates(microlink_t *ml) {
             if (!valid_h2_header) {
                 // This is a continuation of a previous H2 frame (no valid header)
                 // We still need to send WINDOW_UPDATE for the data we received!
-                ESP_LOGD(TAG, "H2 continuation frame: decrypted_len=%zu (no header), stream=%d",
-                         decrypted_len, last_partial_stream_id);
+                ESP_LOGD(TAG, "H2 continuation frame: decrypted_len=%u (no header), stream=%d",
+                         (unsigned int)decrypted_len, last_partial_stream_id);
 
                 // Send WINDOW_UPDATE for connection-level flow control
                 int data_received = (decrypted_len > 0) ? decrypted_len : 0;
@@ -3993,8 +4052,8 @@ esp_err_t microlink_coordination_poll_updates(microlink_t *ml) {
 
             // Valid H2 header but frame spans multiple Noise frames
             if (!complete_h2_frame) {
-                ESP_LOGD(TAG, "Partial H2 %s frame: h2_len=%d decrypted_len=%zu (spanning Noise frames)",
-                         h2_type == 0x00 ? "DATA" : "OTHER", h2_len, decrypted_len);
+                ESP_LOGD(TAG, "Partial H2 %s frame: h2_len=%d decrypted_len=%u (spanning Noise frames)",
+                         h2_type == 0x00 ? "DATA" : "OTHER", h2_len, (unsigned int)decrypted_len);
                 // Still process what we can - fall through to handle partial data
             }
 
@@ -4337,9 +4396,9 @@ static esp_err_t noise_encrypt(const uint8_t *key, uint64_t nonce,
  */
 static void coordination_poll_task(void *pvParameters) {
     microlink_t *ml = (microlink_t *)pvParameters;
-    ESP_LOGI(TAG, "Coordination poll task started on Core %d, rx_nonce=%llu, tx_nonce=%llu",
-             xPortGetCoreID(), (unsigned long long)ml->coordination.rx_nonce,
-             (unsigned long long)ml->coordination.tx_nonce);
+    ESP_LOGI(TAG, "Coordination poll task started on Core %d, rx_nonce=%lu, tx_nonce=%lu",
+             xPortGetCoreID(), (unsigned long)ml->coordination.rx_nonce,
+             (unsigned long)ml->coordination.tx_nonce);
 
     uint64_t last_ping_ms = 0;
     uint64_t last_log_ms = 0;
@@ -4434,8 +4493,8 @@ static void coordination_poll_task(void *pvParameters) {
             buffer_len += recv_len;
 
             // Log what we received for debugging
-            ESP_LOGI(TAG, "[Core1] Recv %d bytes (buffer now %zu), first 16: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
-                     recv_len, buffer_len,
+            ESP_LOGI(TAG, "[Core1] Recv %d bytes (buffer now %u), first 16: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+                     recv_len, (unsigned int)buffer_len,
                      recv_buffer[old_buffer_len+0], recv_buffer[old_buffer_len+1], recv_buffer[old_buffer_len+2], recv_buffer[old_buffer_len+3],
                      recv_buffer[old_buffer_len+4], recv_buffer[old_buffer_len+5], recv_buffer[old_buffer_len+6], recv_buffer[old_buffer_len+7],
                      recv_buffer[old_buffer_len+8], recv_buffer[old_buffer_len+9], recv_buffer[old_buffer_len+10], recv_buffer[old_buffer_len+11],
@@ -4447,15 +4506,15 @@ static void coordination_poll_task(void *pvParameters) {
 
             while (consumed + 3 <= buffer_len) {
                 if (data[consumed] != 0x04) {
-                    ESP_LOGW(TAG, "[Core1] Non-0x04 byte at offset %zu: 0x%02x", consumed, data[consumed]);
+                    ESP_LOGW(TAG, "[Core1] Non-0x04 byte at offset %u: 0x%02x", (unsigned int)consumed, data[consumed]);
                     consumed++;
                     continue;
                 }
 
                 int payload_len = (data[consumed + 1] << 8) | data[consumed + 2];
                 if (consumed + 3 + payload_len > buffer_len) {
-                    ESP_LOGD(TAG, "[Core1] Incomplete frame: need %d bytes, have %zu",
-                             3 + payload_len, buffer_len - consumed);
+                    ESP_LOGD(TAG, "[Core1] Incomplete frame: need %d bytes, have %u",
+                             3 + payload_len, (unsigned int)(buffer_len - consumed));
                     break;  // Incomplete frame - will get rest on next recv
                 }
 
@@ -4481,9 +4540,9 @@ static void coordination_poll_task(void *pvParameters) {
                         decrypt_fail_count = 0;  // Reset on success
 
                         // Log successful frame processing for debugging
-                        ESP_LOGI(TAG, "[Core1] Frame OK: nonce=%llu, decrypted_len=%zu, rx_nonce now=%llu",
-                                 (unsigned long long)try_nonce, decrypted_len,
-                                 (unsigned long long)ml->coordination.rx_nonce);
+                        ESP_LOGI(TAG, "[Core1] Frame OK: nonce=%lu, decrypted_len=%u, rx_nonce now=%lu",
+                                 (unsigned long)try_nonce, (unsigned int)decrypted_len,
+                                 (unsigned long)ml->coordination.rx_nonce);
 
                         // Parse HTTP/2 frame and handle WINDOW_UPDATE if needed
                         if (decrypted_len >= 9) {
@@ -4526,9 +4585,9 @@ static void coordination_poll_task(void *pvParameters) {
                         // Decrypt failed - this is fatal for Noise protocol
                         // Once we're desync'd on nonces, all subsequent frames will fail
                         decrypt_fail_count++;
-                        ESP_LOGW(TAG, "[Core1] Decrypt failed (count=%d) nonce=%llu, frame_len=%d, consumed=%zu/%d",
-                                 decrypt_fail_count, (unsigned long long)try_nonce, payload_len,
-                                 consumed, recv_len);
+                        ESP_LOGW(TAG, "[Core1] Decrypt failed (count=%d) nonce=%lu, frame_len=%d, consumed=%u/%d",
+                                 decrypt_fail_count, (unsigned long)try_nonce, payload_len,
+                                 (unsigned int)consumed, recv_len);
                         ESP_LOGW(TAG, "[Core1] Frame bytes: %02x%02x%02x | %02x%02x%02x%02x %02x%02x%02x%02x",
                                  data[consumed], data[consumed+1], data[consumed+2],
                                  data[consumed+3], data[consumed+4], data[consumed+5], data[consumed+6],
@@ -4546,15 +4605,15 @@ static void coordination_poll_task(void *pvParameters) {
             }
 
             // Log summary of frame processing
-            ESP_LOGI(TAG, "[Core1] Processed: consumed=%zu/%zu bytes, frames_ok=%lu",
-                     consumed, buffer_len, (unsigned long)local_frames_processed);
+            ESP_LOGI(TAG, "[Core1] Processed: consumed=%u/%u bytes, frames_ok=%lu",
+                     (unsigned int)consumed, (unsigned int)buffer_len, (unsigned long)local_frames_processed);
 
             // Preserve unconsumed data for next recv
             if (consumed > 0 && consumed < buffer_len) {
                 size_t remaining = buffer_len - consumed;
                 memmove(recv_buffer, recv_buffer + consumed, remaining);
                 buffer_len = remaining;
-                ESP_LOGD(TAG, "[Core1] Preserved %zu bytes of partial frame data", remaining);
+                ESP_LOGD(TAG, "[Core1] Preserved %u bytes of partial frame data", (unsigned int)remaining);
             } else if (consumed == buffer_len) {
                 // All data consumed
                 buffer_len = 0;

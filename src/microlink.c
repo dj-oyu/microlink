@@ -11,21 +11,36 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include "esp_mac.h"
 #include "lwip/netif.h"
 #include "lwip/ip_addr.h"
 #include "lwip/err.h"
 
 static const char *TAG = "microlink";
 
+/* Static buffer for auto-generated device name */
+static char s_device_name[20] = {0};
+
 /* ============================================================================
  * Default Configuration
  * ========================================================================== */
+
+const char *microlink_get_device_name(void) {
+    if (s_device_name[0] == '\0') {
+        // Generate from WiFi MAC address (last 3 bytes)
+        uint8_t mac[6];
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        snprintf(s_device_name, sizeof(s_device_name), "esp32-%02x%02x%02x",
+                 mac[3], mac[4], mac[5]);
+    }
+    return s_device_name;
+}
 
 void microlink_get_default_config(microlink_config_t *config) {
     memset(config, 0, sizeof(microlink_config_t));
 
     config->auth_key = NULL;           // Must be set by user
-    config->device_name = "nexus-watch";
+    config->device_name = microlink_get_device_name();  // Auto-generated from MAC
     config->enable_derp = true;
     config->enable_stun = true;
     config->enable_disco = true;
@@ -48,6 +63,11 @@ const char *microlink_vpn_ip_to_str(uint32_t vpn_ip, char *buffer) {
              (vpn_ip >> 8) & 0xFF,
              vpn_ip & 0xFF);
     return buffer;
+}
+
+int microlink_get_peer_count(const microlink_t *ml) {
+    if (!ml) return 0;
+    return ml->peer_count;
 }
 
 const char *microlink_state_to_str(microlink_state_t state) {
