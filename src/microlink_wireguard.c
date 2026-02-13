@@ -547,15 +547,16 @@ esp_err_t microlink_wireguard_update_endpoint(microlink_t *ml, uint32_t vpn_ip,
         return ESP_ERR_NOT_FOUND;
     }
 
-    // Skip if endpoint is unchanged (avoid redundant handshake initiation)
+    // If endpoint is already set, still force handshake to ensure direct path.
+    // The endpoint may have been set by a prior call but handshake may not have
+    // completed (e.g. old wireguardif_connect() didn't trigger handshake).
     ip_addr_t current_ip;
     u16_t current_port;
     if (wireguardif_peer_is_up(netif, peer_index, &current_ip, &current_port) == ERR_OK) {
         uint32_t current_ml_ip = lwip_ip_to_microlink(&current_ip);
         if (current_ml_ip == endpoint_ip && current_port == endpoint_port) {
-            ESP_LOGD(TAG, "Endpoint unchanged (%u.%u.%u.%u:%u), skipping",
-                     (endpoint_ip >> 24) & 0xFF, (endpoint_ip >> 16) & 0xFF,
-                     (endpoint_ip >> 8) & 0xFF, endpoint_ip & 0xFF, endpoint_port);
+            ESP_LOGI(TAG, "Endpoint unchanged, re-triggering handshake for direct path");
+            wireguardif_connect_direct(netif, peer_index);
             return ESP_OK;
         }
     }
