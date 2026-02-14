@@ -58,6 +58,7 @@ static const char *TAG = "ml_disco";
 #define DISCO_PROBE_INTERVAL_DIRECT_MS  30000  // 30 seconds when direct path is already established
 #define DISCO_PROBE_TIMEOUT_MS          3000   // 3 second timeout for response
 #define DISCO_STALE_THRESHOLD_MS        30000  // Consider path stale after 30s
+#define DISCO_PONG_RATE_LIMIT_MS        5000   // Min interval between outgoing PONGs per peer
 
 /* Maximum DISCO packet size */
 #define DISCO_MAX_PACKET_SIZE   256
@@ -426,7 +427,7 @@ static esp_err_t disco_probe_endpoint(microlink_t *ml, uint8_t peer_idx, uint8_t
 
     {
         uint32_t hip = ntohl(ep->addr.ip4);
-        ESP_LOGI(TAG, "DISCO ping -> %lu.%lu.%lu.%lu:%d (peer %d ep %d)",
+        ESP_LOGD(TAG, "DISCO ping -> %lu.%lu.%lu.%lu:%d (peer %d ep %d)",
                  (unsigned long)(hip >> 24) & 0xFF, (unsigned long)(hip >> 16) & 0xFF,
                  (unsigned long)(hip >> 8) & 0xFF, (unsigned long)hip & 0xFF,
                  ep->port, peer_idx, ep_idx);
@@ -494,7 +495,7 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
     const uint8_t *txid = plaintext + 2;
     (void)msg_version;
 
-    ESP_LOGI(TAG, "DISCO rx %s from peer %d (%s) src=%lu.%lu.%lu.%lu:%u",
+    ESP_LOGD(TAG, "DISCO rx %s from peer %d (%s) src=%lu.%lu.%lu.%lu:%u",
              msg_type == DISCO_MSG_PING ? "PING" :
              msg_type == DISCO_MSG_PONG ? "PONG" :
              msg_type == DISCO_MSG_CALL_ME_MAYBE ? "CALL_ME_MAYBE" : "UNKNOWN",
@@ -505,7 +506,26 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
 
     switch (msg_type) {
         case DISCO_MSG_PING: {
-            ESP_LOGI(TAG, "PING from peer %d (%s)", peer_idx, peer->hostname);
+            // Direct PINGs prove path liveness — update last_seen_ms
+            if (src_ip != 0) {
+                peer->last_seen_ms = (uint32_t)microlink_get_time_ms();
+            }
+
+            ESP_LOGD(TAG, "PING from peer %d (%s)", peer_idx, peer->hostname);
+
+            // Rate-limit PONG responses when direct path is established.
+            // Always respond immediately when searching (using_derp) or first time.
+            uint64_t now_pong = microlink_get_time_ms();
+            uint64_t last_pong = ml->disco.peer_disco[peer_idx].last_pong_sent_ms;
+            bool should_respond = peer->using_derp ||
+                                  last_pong == 0 ||
+                                  (now_pong - last_pong) >= DISCO_PONG_RATE_LIMIT_MS;
+
+            if (!should_respond) {
+                ESP_LOGD(TAG, "PONG rate-limited for peer %d", peer_idx);
+                break;
+            }
+
             uint8_t pong[DISCO_MAX_PACKET_SIZE];
             uint32_t pong_src_ip = src_ip;
             uint16_t pong_src_port = src_port;
@@ -518,14 +538,16 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
                 if (src_ip == 0) {
                     esp_err_t err = microlink_derp_send(ml, peer->vpn_ip, pong, pong_len);
                     if (err == ESP_OK) {
-                        ESP_LOGI(TAG, "PONG sent via DERP to peer %d", peer_idx);
+                        ESP_LOGD(TAG, "PONG sent via DERP to peer %d", peer_idx);
+                        ml->disco.peer_disco[peer_idx].last_pong_sent_ms = now_pong;
                     } else {
                         ESP_LOGE(TAG, "Failed to send PONG via DERP: %s", esp_err_to_name(err));
                     }
                 } else {
                     // src_ip is host byte order; sendto expects network byte order
                     microlink_disco_sendto(ml, htonl(src_ip), src_port, pong, pong_len);
-                    ESP_LOGI(TAG, "PONG sent to peer %d", peer_idx);
+                    ESP_LOGD(TAG, "PONG sent to peer %d", peer_idx);
+                    ml->disco.peer_disco[peer_idx].last_pong_sent_ms = now_pong;
                 }
             } else {
                 ESP_LOGE(TAG, "Failed to build PONG");
@@ -548,7 +570,7 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
                     bool is_derp_slot = (ep == MICROLINK_MAX_ENDPOINTS - 1);
 
                     if (is_derp_slot || via_derp) {
-                        ESP_LOGI(TAG, "PONG peer %d via DERP: %lums", peer_idx, (unsigned long)rtt);
+                        ESP_LOGD(TAG, "PONG peer %d via DERP: %lums", peer_idx, (unsigned long)rtt);
                         if (peer->using_derp) {
                             if (peer->latency_ms == 0 || rtt < peer->latency_ms) {
                                 peer->latency_ms = rtt;
@@ -556,7 +578,7 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
                             }
                         }
                     } else {
-                        ESP_LOGI(TAG, "PONG peer %d direct: %lums src=%lu.%lu.%lu.%lu:%u",
+                        ESP_LOGD(TAG, "PONG peer %d direct: %lums src=%lu.%lu.%lu.%lu:%u",
                                  peer_idx, (unsigned long)rtt,
                                  (unsigned long)(src_ip >> 24) & 0xFF,
                                  (unsigned long)(src_ip >> 16) & 0xFF,
@@ -564,13 +586,10 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
                                  (unsigned long)src_ip & 0xFF, src_port);
                         peer->latency_ms = rtt;
                         peer->best_endpoint_idx = ep;
-                        if (ep < peer->endpoint_count && !peer->endpoints[ep].is_derp) {
-                            esp_err_t ep_ret = microlink_wireguard_update_endpoint(
-                                ml, peer->vpn_ip, src_ip, src_port);
-                            if (ep_ret != ESP_OK) {
-                                ESP_LOGW(TAG, "update_endpoint failed: %d", ep_ret);
-                            }
-                        }
+                        // Ensure WG connect_ip/connect_port are in sync
+                        // (update_peer_addr() already handles ip/port on rx)
+                        microlink_wireguard_update_endpoint(
+                            ml, peer->vpn_ip, src_ip, src_port);
                         peer->using_derp = false;
                     }
 
@@ -622,6 +641,17 @@ static esp_err_t disco_process_packet(microlink_t *ml, const uint8_t *packet, si
 
         case DISCO_MSG_CALL_ME_MAYBE: {
             ml->disco.peer_disco[peer_idx].active = true;
+
+            // Skip probing if direct path is fresh — no need for hole-punch
+            if (!peer->using_derp && peer->last_seen_ms > 0) {
+                uint64_t now_cmm = microlink_get_time_ms();
+                uint64_t age = now_cmm - (uint64_t)peer->last_seen_ms;
+                if (age < DISCO_STALE_THRESHOLD_MS / 2) {
+                    ESP_LOGD(TAG, "CMM from peer %d ignored: direct path fresh (%lums ago)",
+                             peer_idx, (unsigned long)age);
+                    break;
+                }
+            }
 
             // Parse endpoint list from CallMeMaybe payload
             // Format after type+version: N × 18 bytes (16B IPv4-mapped-IPv6 + 2B port BE)
@@ -796,8 +826,11 @@ esp_err_t microlink_disco_probe_peers(microlink_t *ml) {
             continue;
         }
 
-        ESP_LOGI(TAG, "DISCO probe peer %d (%s) %s",
-                 i, peer->hostname, peer->using_derp ? "[searching]" : "[maintenance]");
+        if (peer->using_derp) {
+            ESP_LOGI(TAG, "DISCO probe peer %d (%s) [searching]", i, peer->hostname);
+        } else {
+            ESP_LOGD(TAG, "DISCO probe peer %d (%s) [maintenance]", i, peer->hostname);
+        }
 
         for (uint8_t ep = 0; ep < peer->endpoint_count; ep++) {
             disco_probe_endpoint(ml, i, ep);
@@ -906,6 +939,16 @@ esp_err_t microlink_disco_update_paths(microlink_t *ml) {
             if (!peer->using_derp) {
                 ESP_LOGI(TAG, "Peer %d: direct path lost, reverting to DERP", i);
                 peer->using_derp = true;
+                // Reset WG endpoint to DERP relay and re-handshake
+                if (ml->wireguard.netif) {
+                    uint8_t last_byte = peer->vpn_ip & 0xFF;
+                    if (last_byte < MICROLINK_PEER_MAP_SIZE) {
+                        uint8_t wg_idx = ml->peer_map[last_byte];
+                        if (wg_idx != 0xFF) {
+                            wireguardif_connect_derp((struct netif *)ml->wireguard.netif, wg_idx);
+                        }
+                    }
+                }
             }
         }
     }
@@ -939,7 +982,7 @@ static esp_err_t disco_probe_via_derp(microlink_t *ml, uint8_t peer_idx) {
     probe->send_time_ms = microlink_get_time_ms();
     probe->pending = true;
 
-    ESP_LOGI(TAG, "DISCO ping via DERP to peer %d (%s)", peer_idx, peer->hostname);
+    ESP_LOGD(TAG, "DISCO ping via DERP to peer %d (%s)", peer_idx, peer->hostname);
     return ESP_OK;
 }
 

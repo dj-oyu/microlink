@@ -123,6 +123,10 @@ err_t wireguardif_update_endpoint(struct netif *netif, u8_t peer_index, const ip
 // Try and connect to the given peer
 err_t wireguardif_connect(struct netif *netif, u8_t peer_index);
 
+// Connect to peer via direct endpoint and force immediate handshake
+// Use when promoting from DERP relay to direct path
+err_t wireguardif_connect_direct(struct netif *netif, u8_t peer_index);
+
 // Stop trying to connect to the given peer
 err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index);
 

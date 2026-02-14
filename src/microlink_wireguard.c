@@ -547,45 +547,31 @@ esp_err_t microlink_wireguard_update_endpoint(microlink_t *ml, uint32_t vpn_ip,
         return ESP_ERR_NOT_FOUND;
     }
 
-    // Skip if endpoint is unchanged (avoid redundant handshake initiation)
-    ip_addr_t current_ip;
-    u16_t current_port;
-    if (wireguardif_peer_is_up(netif, peer_index, &current_ip, &current_port) == ERR_OK) {
-        uint32_t current_ml_ip = lwip_ip_to_microlink(&current_ip);
-        if (current_ml_ip == endpoint_ip && current_port == endpoint_port) {
-            ESP_LOGD(TAG, "Endpoint unchanged (%u.%u.%u.%u:%u), skipping",
-                     (endpoint_ip >> 24) & 0xFF, (endpoint_ip >> 16) & 0xFF,
-                     (endpoint_ip >> 8) & 0xFF, endpoint_ip & 0xFF, endpoint_port);
-            return ESP_OK;
-        }
-    }
-
     // Convert endpoint IP to lwIP format
     ip_addr_t lwip_endpoint;
     microlink_ip_to_lwip(endpoint_ip, &lwip_endpoint);
 
-    // Update peer endpoint
+    // Update connect_ip/connect_port and switch peer->ip/port to direct.
+    // No re-handshake needed: WG keypairs are transport-agnostic, so the
+    // existing session works over the new direct path immediately.
     err_t err = wireguardif_update_endpoint(netif, peer_index, &lwip_endpoint, endpoint_port);
     if (err != ERR_OK) {
         ESP_LOGE(TAG, "Failed to update endpoint: lwIP error %d", err);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Updated peer endpoint to %u.%u.%u.%u:%u",
+    err = wireguardif_connect(netif, peer_index);
+    if (err != ERR_OK) {
+        ESP_LOGW(TAG, "Failed to set endpoint: %d", err);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Switched to direct endpoint %u.%u.%u.%u:%u",
              (endpoint_ip >> 24) & 0xFF,
              (endpoint_ip >> 16) & 0xFF,
              (endpoint_ip >> 8) & 0xFF,
              endpoint_ip & 0xFF,
              endpoint_port);
-
-    // Initiate handshake with the NEW endpoint
-    err = wireguardif_connect(netif, peer_index);
-    if (err != ERR_OK) {
-        ESP_LOGW(TAG, "Failed to initiate handshake after endpoint update: %d", err);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "Handshake initiated with updated endpoint");
     return ESP_OK;
 }
 
