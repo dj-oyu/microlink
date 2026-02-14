@@ -214,6 +214,7 @@ typedef struct {
     // Per-peer DISCO state
     struct {
         uint64_t last_probe_ms;
+        uint64_t last_pong_sent_ms;    ///< Rate-limit outgoing PONGs
         uint32_t probe_sequence;
         bool active;
     } peer_disco[MICROLINK_MAX_PEERS];
