@@ -1,0 +1,29 @@
+{
+  "name": "microlink",
+  "version": "2.1.0",
+  "description": "MicroLink v2 - ESP32 Tailscale Client",
+  "build": {
+    "srcDir": ".",
+    "includeDir": "components/microlink/include",
+    "srcFilter": [
+      "+<components/microlink/src/*.c>",
+      "-<components/microlink/src/x25519.c>",
+      "+<components/microlink/components/wireguard_lwip/src/*.c>",
+      "+<components/microlink/components/wireguard_lwip/src/wireguard-platform-esp32.c>",
+      "+<components/microlink/components/wireguard_lwip/src/crypto/refc/*.c>",
+      "-<components/microlink/components/wireguard_lwip/src/crypto/cortex/>",
+      "-<components/microlink/components/wireguard_lwip/example/>"
+    ],
+    "flags": [
+      "-Icomponents/microlink/src",
+      "-Icomponents/microlink/components/wireguard_lwip/src",
+      "-Icomponents/microlink/components/wireguard_lwip/src/crypto/refc",
+      "-DWIREGUARD_CRYPTO_REFC=1",
+      "-DCONFIG_ML_MAX_PEERS=4",
+      "-DCONFIG_ML_H2_BUFFER_SIZE_KB=512",
+      "-DCONFIG_ML_JSON_BUFFER_SIZE_KB=512",
+      "-DCONFIG_ML_NVS_MAX_PEERS=64",
+      "-include ml_pio_config.h"
+    ]
+  }
+}
