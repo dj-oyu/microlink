@@ -165,6 +165,32 @@ void chacha20_init(struct chacha20_ctx *ctx, const uint8_t *key, const uint64_t 
 	ctx->state[15] = nonce >> 32;
 }
 
+// RFC 7539 ChaCha20 with 12-byte nonce and explicit initial counter.
+// Sets up state per §2.3: constants | key | counter | nonce(12 bytes).
+void chacha20_crypt_rfc7539(const uint8_t key[32], const uint8_t nonce[12],
+                             uint32_t initial_counter,
+                             const uint8_t *in, uint8_t *out, size_t len) {
+	struct chacha20_ctx ctx;
+	ctx.state[0] = CHACHA20_CONSTANT_1;
+	ctx.state[1] = CHACHA20_CONSTANT_2;
+	ctx.state[2] = CHACHA20_CONSTANT_3;
+	ctx.state[3] = CHACHA20_CONSTANT_4;
+	ctx.state[4]  = U8TO32_LITTLE(key + 0);
+	ctx.state[5]  = U8TO32_LITTLE(key + 4);
+	ctx.state[6]  = U8TO32_LITTLE(key + 8);
+	ctx.state[7]  = U8TO32_LITTLE(key + 12);
+	ctx.state[8]  = U8TO32_LITTLE(key + 16);
+	ctx.state[9]  = U8TO32_LITTLE(key + 20);
+	ctx.state[10] = U8TO32_LITTLE(key + 24);
+	ctx.state[11] = U8TO32_LITTLE(key + 28);
+	ctx.state[12] = initial_counter;
+	ctx.state[13] = U8TO32_LITTLE(nonce + 0);
+	ctx.state[14] = U8TO32_LITTLE(nonce + 4);
+	ctx.state[15] = U8TO32_LITTLE(nonce + 8);
+	chacha20(&ctx, out, in, (uint32_t)len);
+	crypto_zero(&ctx, sizeof(ctx));
+}
+
 // 2.2. HChaCha20
 // HChaCha20 is initialized the same way as the ChaCha cipher, except that HChaCha20 uses a 128-bit nonce and has no counter.
 // After initialization, proceed through the ChaCha rounds as usual.

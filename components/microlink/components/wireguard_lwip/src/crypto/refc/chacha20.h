@@ -38,6 +38,7 @@
 #define _CHACHA20_H_
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define CHACHA20_BLOCK_SIZE		(64)
 #define CHACHA20_KEY_SIZE		(32)
@@ -49,5 +50,12 @@ struct chacha20_ctx {
 void chacha20_init(struct chacha20_ctx *ctx, const uint8_t *key, const uint64_t nonce);
 void chacha20(struct chacha20_ctx *ctx, uint8_t *out, const uint8_t *in, uint32_t len);
 void hchacha20(uint8_t *out, const uint8_t *nonce, const uint8_t *key);
+
+/* RFC 7539 ChaCha20 with 12-byte nonce and explicit initial counter.
+ * This is the primary entry point for AEAD construction and the function
+ * that PIE vectorization will replace in Phase 3. */
+void chacha20_crypt_rfc7539(const uint8_t key[32], const uint8_t nonce[12],
+                             uint32_t initial_counter,
+                             const uint8_t *in, uint8_t *out, size_t len);
 
 #endif /* _CHACHA20_H_ */

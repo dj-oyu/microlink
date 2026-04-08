@@ -290,6 +290,8 @@ static void route_derp_packet(microlink_t *ml, uint8_t *data, size_t len,
     QueueHandle_t target = (type == PKT_DISCO) ? ml->disco_rx_queue : ml->wg_rx_queue;
     if (xQueueSend(target, &pkt, 0) != pdTRUE) {
         free(data);
+    } else if (target == ml->wg_rx_queue && ml->wg_mgr_task) {
+        xTaskNotifyGive(ml->wg_mgr_task);
     }
 }
 

@@ -1612,31 +1612,32 @@ void ml_wg_mgr_task(void *arg) {
         }
 
         /* Run WireGuard periodic processing (handshakes, keepalives, rekeys).
-         * This runs on OUR task stack (8KB) instead of the lwIP TCPIP thread (3-8KB),
-         * preventing heavy crypto (X25519, ChaCha20-Poly1305) from monopolizing
-         * the TCPIP thread and blocking all socket operations system-wide. */
+         * This runs on OUR task stack instead of the lwIP TCPIP thread,
+         * preventing heavy crypto from blocking all socket operations.
+         * Yield after periodic work so Fetch (lower priority, same core)
+         * gets CPU time — without this, X25519 handshakes starve Fetch. */
         uint64_t now = ml_get_time_ms();
-        if (ml->wg_netif && now - last_wg_periodic_ms >= 400) {
-            uint64_t t0 = now;
+        if (ml->wg_netif && now - last_wg_periodic_ms >= 1000) {
             wireguardif_periodic((struct netif *)ml->wg_netif);
-            uint64_t dt = ml_get_time_ms() - t0;
-            last_wg_periodic_ms = now;
-            ESP_LOGI(TAG, "wireguardif_periodic: %llu ms", (unsigned long long)dt);
+            last_wg_periodic_ms = ml_get_time_ms();
+            taskYIELD();
+            /* Drain any WG packets that arrived during periodic processing */
+            while (xQueueReceive(ml->wg_rx_queue, &wg_pkt, 0) == pdTRUE) {
+                process_wg_packet(ml, &wg_pkt);
+            }
         }
 
-        /* Periodic DISCO probes (every 1s check) */
+        /* Periodic DISCO probes */
         now = ml_get_time_ms();
-        if (now - last_disco_probe_ms > 1000) {
-            uint64_t t0 = now;
+        if (now - last_disco_probe_ms > 3000) {
             disco_periodic_probes(ml);
-            uint64_t dt = ml_get_time_ms() - t0;
-            last_disco_probe_ms = now;
-            ESP_LOGI(TAG, "disco_periodic_probes: %llu ms", (unsigned long long)dt);
+            last_disco_probe_ms = ml_get_time_ms();
+            taskYIELD();
         }
 
-        /* Yield - 10ms loop rate for minimum packet processing latency.
-         * Each wake is cheap: queue check + event bits check, no crypto. */
-        vTaskDelay(pdMS_TO_TICKS(10));
+        /* Event-driven yield: wake immediately on xTaskNotifyGive from
+         * net_io/DERP, or timeout after 10ms for periodic processing. */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
     }
 
     /* Shutdown WireGuard interface */
