@@ -1617,7 +1617,7 @@ void ml_wg_mgr_task(void *arg) {
          * Yield after periodic work so Fetch (lower priority, same core)
          * gets CPU time — without this, X25519 handshakes starve Fetch. */
         uint64_t now = ml_get_time_ms();
-        if (ml->wg_netif && now - last_wg_periodic_ms >= 1000) {
+        if (ml->wg_netif && now - last_wg_periodic_ms >= 2000) {
             wireguardif_periodic((struct netif *)ml->wg_netif);
             last_wg_periodic_ms = ml_get_time_ms();
             taskYIELD();
@@ -1629,7 +1629,7 @@ void ml_wg_mgr_task(void *arg) {
 
         /* Periodic DISCO probes */
         now = ml_get_time_ms();
-        if (now - last_disco_probe_ms > 3000) {
+        if (now - last_disco_probe_ms > 5000) {
             disco_periodic_probes(ml);
             last_disco_probe_ms = ml_get_time_ms();
             taskYIELD();
