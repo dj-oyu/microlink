@@ -118,7 +118,7 @@ static void chacha20_block_scalar(struct chacha20_ctx *ctx, uint8_t *stream) {
 	}
 }
 
-/* NOTE: PIE (ESP32-P4 SIMD) was investigated for ChaCha20 acceleration but
+/* NOTE: PIE (ESP32-P4 SIMD) ChaCha20 acceleration was investigated and
  * abandoned. esp.vadd.u32/s32 are SATURATING, not wrapping (modular).
  * ChaCha20 requires modular 32-bit addition. Synthesizing wrapping add from
  * bitwise ops (Kogge-Stone CLA) costs ~35 instructions per vector add,
