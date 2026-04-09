@@ -41,6 +41,10 @@
 #include <stdint.h>
 #include "../../crypto.h"
 
+#ifdef ESP_PLATFORM
+#include "soc/soc_caps.h"
+#endif
+
 // 2.3.  The ChaCha20 Block Function
 // The first four words (0-3) are constants: 0x61707865, 0x3320646e, 0x79622d32, 0x6b206574
 static const uint32_t CHACHA20_CONSTANT_1 = 0x61707865;
@@ -99,7 +103,7 @@ static inline void INNER_BLOCK(uint32_t *block) {
 //	state += working_state
 //	return serialize(state)
 // end
-static void chacha20_block(struct chacha20_ctx *ctx, uint8_t *stream) {
+static void chacha20_block_scalar(struct chacha20_ctx *ctx, uint8_t *stream) {
 	uint32_t working_state[16];
 	int i;
 
@@ -114,13 +118,20 @@ static void chacha20_block(struct chacha20_ctx *ctx, uint8_t *stream) {
 	}
 }
 
+/* NOTE: PIE (ESP32-P4 SIMD) was investigated for ChaCha20 acceleration but
+ * abandoned. esp.vadd.u32/s32 are SATURATING, not wrapping (modular).
+ * ChaCha20 requires modular 32-bit addition. Synthesizing wrapping add from
+ * bitwise ops (Kogge-Stone CLA) costs ~35 instructions per vector add,
+ * making PIE 3x SLOWER than scalar. See research/probe_pie.py for ISA probing.
+ */
+
 void chacha20(struct chacha20_ctx *ctx, uint8_t *out, const uint8_t *in, uint32_t len) {
 	uint8_t output[CHACHA20_BLOCK_SIZE];
 	int i;
 
 	if (len) {
 		for (;;) {
-			chacha20_block(ctx, output);
+			chacha20_block_scalar(ctx, output);
 			// Word 12 is a block counter
 			ctx->state[12] = PLUSONE(ctx->state[12]);
 			if (len <= 64) {
